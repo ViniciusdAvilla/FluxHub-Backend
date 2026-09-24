@@ -70,3 +70,115 @@ def get_top_stock():
         )
 
         return service.get_top_stock()
+    
+
+@router.get("/catalog-health")
+def get_catalog_health():
+
+    with Session(engine) as session:
+
+        repository = ProductRepository(
+            session
+        )
+
+        service = ProductService(
+            repository
+        )
+
+        return service.get_catalog_health()
+    
+
+@router.get("/categories")
+def get_categories():
+
+    with Session(engine) as session:
+
+        repository = ProductRepository(
+            session
+        )
+
+        service = ProductService(
+            repository
+        )
+
+        return service.get_categories()
+    
+
+@router.get("/brands")
+def get_brands():
+
+    with Session(engine) as session:
+
+        repository = ProductRepository(
+            session
+        )
+
+        service = ProductService(
+            repository
+        )
+
+        return service.get_brands()  
+    
+
+@router.get("/out-of-stock")
+def get_out_of_stock():
+
+    with Session(engine) as session:
+
+        repository = ProductRepository(
+            session
+        )
+
+        service = ProductService(
+            repository
+        )
+
+        return service.get_out_of_stock()
+
+          
+@router.get("/low-stock")
+def get_low_stock():
+
+    with Session(engine) as session:
+
+        repository = ProductRepository(
+            session
+        )
+
+        service = ProductService(
+            repository
+        )
+
+        return service.get_low_stock()
+
+@router.get("/low-rating")
+def get_low_rating():
+
+    with Session(engine) as session:
+
+        repository = ProductRepository(
+            session
+        )
+
+        service = ProductService(
+            repository
+        )
+
+        return service.get_low_rating()
+
+@router.get("/top-rated")
+def get_top_rated():
+
+    with Session(engine) as session:
+
+        repository = ProductRepository(
+            session
+        )
+
+        service = ProductService(
+            repository
+        )
+
+        return service.get_top_rated()
+    
+    
