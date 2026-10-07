@@ -2,5 +2,6 @@ fastapi
 uvicorn
 pydantic-settings
 httpx
+sqlalchemy
 pytest
 pytest-asyncio
