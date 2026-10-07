@@ -10,8 +10,10 @@ from app.services.product_import import ProductImportService
 with Session(engine) as session:
 
     connector = ExcelProducts(
-        "app/connectors/excel/data/shopping_dos_utilitarios_1000_produtos.xlsx"
-    )
+    "app/connectors/excel/data/shopping_dos_utilitarios_5000_produtos_anuncios.xlsx"
+)
+
+    print(connector.file_path)
 
     repository = ProductRepository(session)
 

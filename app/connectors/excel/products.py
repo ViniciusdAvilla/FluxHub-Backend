@@ -18,6 +18,9 @@ class ExcelProducts(ProductSource):
             sheet_name="Produtos_ML"
         )
 
+        print(f"Arquivo: {self.file_path}")
+        print(f"Linhas carregadas: {len(dataframe)}")
+
         products = []
 
         for _, row in dataframe.iterrows():
