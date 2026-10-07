@@ -32,6 +32,40 @@ class ProductRepository:
 
         return product_model
 
+    def save_many(self, products: list[Product]) -> int:
+            try:
+                self.session.query(ProductModel).delete(
+                    synchronize_session=False
+                )
+
+                product_models = []
+
+                for product in products:
+                    product_model = ProductModel(
+                        external_id=product.external_id,
+                        title=product.title,
+                        category=product.category,
+                        brand=product.brand,
+                        original_price=product.original_price,
+                        promotional_price=product.promotional_price,
+                        discount_rate=product.discount_rate,
+                        stock_qty=product.stock_qty,
+                        sales_30d=product.sales_30d,
+                        rating=product.rating,
+                        is_free_shipping=product.is_free_shipping,
+                        item_condition=product.item_condition,
+                    )
+
+                    product_models.append(product_model)
+
+                self.session.add_all(product_models)
+                self.session.commit()
+
+                return len(product_models)
+
+            except Exception:
+                self.session.rollback()
+                raise
         
     def get_all(self):
 
