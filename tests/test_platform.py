@@ -77,6 +77,10 @@ def test_admin_user_lifecycle_and_isolation(client):
             is_free_shipping=False, item_condition="new"))
         db.commit()
     assert len(c.get("/api/v1/products/", headers=client_headers).json()) == 1
+    assert c.get("/api/v1/stock/", headers=client_headers).json()["total_stock"] == 5
+    assert c.get("/api/v1/stock/", headers=admin_headers).json()["total_stock"] == 0
+    assert c.get("/api/v1/indicators/", headers=admin_headers).json()["total_products"] == 0
+    assert c.get("/api/v1/orders/", headers=client_headers).json() == []
     admin_products = c.get("/api/v1/products/", headers=admin_headers)
     assert admin_products.status_code == 200
     assert admin_products.json() == []
