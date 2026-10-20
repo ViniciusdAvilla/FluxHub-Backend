@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # FluxHub API
 
 ## Mercado Livre OAuth
@@ -134,7 +133,11 @@ sync endpoint deliberately does not invent Ads spend/sales or seller listing
 cancellation data when the upstream API does not provide it. Until the OAuth
 callback is reachable and the app grants the needed Ads permission, these
 responses report `has_ads_data: false`.
-=======
+
+---
+
+> **Nota de manutenção:** esta documentação registra módulos OAuth e analytics que podem não estar disponíveis nesta branch. Consulte as rotas realmente incluídas em `app/main.py` antes de usar seus exemplos.
+
 # FluxHub Backend — segurança da API
 
 Este FastAPI requer um **token de serviço** para todas as rotas, incluindo `/api/v1/products/`, `/docs` e `/openapi.json`. Apenas `GET /api/v1/health` permanece público para monitoramento (responde apenas `{"status":"online"}`).
@@ -194,4 +197,3 @@ A primeira deve retornar 401, as outras 200 quando o banco e a API estiverem dis
 pip install -r requirements.txt
 pytest tests/test_api_auth.py -q
 ```
->>>>>>> 0f0be375cc57f2cc8768c8753476903afcddb5c7

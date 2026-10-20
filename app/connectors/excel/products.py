@@ -18,13 +18,10 @@ class ExcelProducts(ProductSource):
             engine="openpyxl",
         )
 
-<<<<<<< HEAD
         # Manter o mapeamento atual e acrescentar os novos campos
         # ao schema Product e à persistência antes de importá-los.
     
 
-=======
->>>>>>> 0f0be375cc57f2cc8768c8753476903afcddb5c7
         print(f"Arquivo: {self.file_path}")
         print(f"Linhas carregadas: {len(dataframe)}")
 
