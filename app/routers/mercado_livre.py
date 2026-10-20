@@ -1,5 +1,5 @@
 """Per-tenant Mercado Livre OAuth and read-only seller endpoints."""
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -158,6 +158,34 @@ async def orders(account_id: int | None = None,
     return await seller_request(db, account, "/orders/search",
         {"seller": account.mercado_livre_user_id, "limit": limit,
          "offset": offset, "sort": "date_desc"})
+
+
+@router.get("/visits")
+async def seller_visits(account_id: int | None = None,
+                        days: int = Query(default=30, ge=1, le=150),
+                        user: UserModel = Depends(get_current_user),
+                        db: Session = Depends(get_db)):
+    account = get_account(db, user.id, account_id)
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=days)
+    return await seller_request(db, account,
+        f"/users/{account.mercado_livre_user_id}/items_visits",
+        {"date_from": start.isoformat(), "date_to": end.isoformat()})
+
+
+@router.get("/items/{item_id}/visits")
+async def item_visits(item_id: str, account_id: int | None = None,
+                      days: int = Query(default=30, ge=1, le=150),
+                      user: UserModel = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    if not item_id.isalnum() or len(item_id) > 30:
+        raise HTTPException(422, "Identificador inválido.")
+    account = get_account(db, user.id, account_id)
+    info = await seller_request(db, account, f"/items/{item_id}")
+    if int(info.get("seller_id") or 0) != account.mercado_livre_user_id:
+        raise HTTPException(404, "Anúncio não pertence à conta conectada.")
+    return await seller_request(db, account,
+        f"/items/{item_id}/visits/time_window", {"last": days, "unit": "day"})
 
 
 @router.delete("")

@@ -154,12 +154,12 @@ async def sync(account_id: int | None = None,
     ids = [item for item in ids if isinstance(item, str) and item.isalnum()][:limit]
     details = []
     if ids:
-        data = await seller_request(db, account, "/items",
+        data = await seller_request(db, account, "/items/bulk",
                                     {"ids": ",".join(ids)})
         if not isinstance(data, list):
             raise HTTPException(502, "Detalhes de anúncios inválidos.")
         details = [row.get("body") for row in data if isinstance(row, dict)
-                   and row.get("code") == 200 and isinstance(row.get("body"), dict)]
+                   and row.get("status_code", row.get("code")) == 200 and isinstance(row.get("body"), dict)]
 
     imported = 0
     for item in details:

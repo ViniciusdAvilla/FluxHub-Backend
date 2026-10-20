@@ -60,3 +60,8 @@
 - A resposta contém `access_token` de usuário.
 - Chamadas privadas de usuário enviam AMBOS: `X-Backend-Token` e
   `Authorization: Bearer <access_token>`.
+
+- Mercado Livre /items/bulk e status_code substituem o endpoint /items?ids; a API
+  oficial alerta sobre descontinuação de multi-item em 25/10/2026.
+- Leitura de visitas GET /connectors/mercado-livre/visits?days=30 e
+  /items/{item_id}/visits?days=30 consulta API real sob tenant autenticado.
