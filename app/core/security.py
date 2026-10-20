@@ -43,11 +43,12 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
-def create_access_token(user_id: int) -> str:
+def create_access_token(user_id: int, token_version: int = 0) -> str:
     secret = _required_secret(settings.jwt_secret_key, "JWT_SECRET_KEY")
     now = int(time.time())
     payload = {
         "sub": str(user_id),
+        "ver": token_version,
         "iat": now,
         "exp": now + settings.access_token_expire_minutes * 60,
     }
@@ -61,7 +62,7 @@ def create_access_token(user_id: int) -> str:
     return f"{signing_input}.{_b64encode(signature)}"
 
 
-def decode_access_token(token: str) -> int:
+def decode_access_token_claims(token: str) -> tuple[int, int]:
     secret = _required_secret(settings.jwt_secret_key, "JWT_SECRET_KEY")
     try:
         encoded_header, encoded_payload, encoded_signature = token.split(".")
@@ -78,7 +79,7 @@ def decode_access_token(token: str) -> int:
         payload = json.loads(_b64decode(encoded_payload))
         if header.get("alg") != "HS256" or int(payload["exp"]) <= int(time.time()):
             raise ValueError("Expired or invalid token.")
-        return int(payload["sub"])
+        return int(payload["sub"]), int(payload.get("ver", 0))
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise ValueError("Invalid or expired access token.") from error
 
@@ -114,3 +115,7 @@ def _b64encode(value: bytes) -> str:
 
 def _b64decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+def decode_access_token(token: str) -> int:
+    """Backward-compatible ID decoder for existing internal integrations."""
+    return decode_access_token_claims(token)[0]

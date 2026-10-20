@@ -12,8 +12,11 @@ class Settings(BaseSettings):
     mercado_livre_client_id: SecretStr | None = None
     mercado_livre_client_secret: SecretStr | None = None
     mercado_livre_redirect_uri: str = (
-        "https://myfluxhub.tech/api/v1/connectors/mercado-livre/callback"
+        "https://myfluxhub.tech/backend-api/api/v1/connectors/mercado-livre/callback"
     )
+    mercado_pago_client_id: SecretStr | None = None
+    mercado_pago_client_secret: SecretStr | None = None
+    mercado_pago_redirect_uri: str = "https://myfluxhub.tech/backend-api/api/v1/connectors/mercado-pago/callback"
     frontend_url: str = "http://localhost:3000"
     token_encryption_key: SecretStr | None = None
     access_token_expire_minutes: int = 60

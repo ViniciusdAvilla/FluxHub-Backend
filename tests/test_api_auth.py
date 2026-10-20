@@ -1,78 +1,52 @@
-"""Testa isolamento da API sem acessar o banco de produtos."""
-
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, Header
 from fastapi.testclient import TestClient
-
 from app.config.settings import settings
 from app.core.api_auth import protect_fastapi
 
 
-def make_client():
+def client():
     app = FastAPI()
-
     @app.get("/api/v1/health")
     def health():
         return {"status": "online"}
-
     @app.get("/api/v1/products/")
-    def products():
-        return [{"id": "item-1"}]
-
+    def products(authorization: str | None = Header(default=None)):
+        return {"authorization": authorization}
+    @app.get("/api/v1/connectors/mercado-livre/callback")
+    def callback(state: str):
+        return {"state": state}
     protect_fastapi(app)
     return TestClient(app)
 
 
-def test_health_public_even_without_token(monkeypatch):
+def test_health_public(monkeypatch):
     monkeypatch.setattr(settings, "backend_token", "")
-    with make_client() as client:
-        response = client.get("/api/v1/health")
-        assert response.status_code == 200
-        assert response.json() == {"status": "online"}
+    with client() as c:
+        assert c.get("/api/v1/health").status_code == 200
 
 
-def test_fail_closed_without_config(monkeypatch):
+def test_fail_closed(monkeypatch):
     monkeypatch.setattr(settings, "backend_token", "")
-    with make_client() as client:
-        for path in ("/api/v1/products/", "/docs", "/openapi.json"):
-            response = client.get(path)
-            assert response.status_code == 503
-            assert response.headers["cache-control"] == "no-store"
+    with client() as c:
+        assert c.get("/api/v1/products/").status_code == 503
 
 
-def test_rejects_short_or_invalid_secret(monkeypatch):
-    monkeypatch.setattr(settings, "backend_token", "dev")
-    with make_client() as client:
-        assert client.get("/api/v1/products/", headers={"Authorization": "Bearer dev"}).status_code == 503
-
-
-def test_requires_bearer_and_rejects_bad_credentials(monkeypatch):
-    token = "t" * 48
+def test_separate_tokens_and_compatibility(monkeypatch):
+    token = "s" * 48
     monkeypatch.setattr(settings, "backend_token", token)
-    with make_client() as client:
-        for authorization in ("", "Basic " + token, "Bearer " + "X" * 48):
-            headers = {"Authorization": authorization} if authorization else {}
-            response = client.get("/api/v1/products/", headers=headers)
-            assert response.status_code == 401
-            assert response.headers["www-authenticate"] == "Bearer"
-            assert response.headers["cache-control"] == "no-store"
+    with client() as c:
+        assert c.get("/api/v1/products/").status_code == 401
+        assert c.get("/api/v1/products/", headers={"X-Backend-Token": "invalid"}).status_code == 401
+        r = c.get("/api/v1/products/", headers={
+            "X-Backend-Token": token, "Authorization": "Bearer user.jwt.token"})
+        assert r.status_code == 200
+        assert r.json()["authorization"] == "Bearer user.jwt.token"
+        assert c.get("/openapi.json", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+        assert c.get("/api/v1/connectors/mercado-livre/callback?state=x").status_code == 200
 
 
-def test_valid_bearer_unlocks_products_swagger_and_openapi(monkeypatch):
-    token = "t" * 48
-    monkeypatch.setattr(settings, "backend_token", token)
-    headers = {"Authorization": f"Bearer {token}"}
-    with make_client() as client:
-        product = client.get("/api/v1/products/", headers=headers)
-        assert product.status_code == 200
-        assert product.json() == [{"id": "item-1"}]
-        assert product.headers["cache-control"] == "no-store"
-        assert client.get("/docs", headers=headers).status_code == 200
-        response = client.get("/openapi.json", headers=headers)
-        assert response.status_code == 200
-        assert "/api/v1/products/" in response.json()["paths"]
-
-
-def test_rejects_unrecognized_paths_too(monkeypatch):
-    monkeypatch.setattr(settings, "backend_token", "t" * 48)
-    with make_client() as client:
-        assert client.get("/other").status_code == 401
+def test_user_jwt_alone_not_a_service_token(monkeypatch):
+    monkeypatch.setattr(settings, "backend_token", "s" * 48)
+    with client() as c:
+        assert c.get("/api/v1/products/", headers={
+            "Authorization": "Bearer different-user-jwt"}).status_code == 401

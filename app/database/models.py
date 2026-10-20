@@ -69,6 +69,9 @@ class UserModel(Base):
     __tablename__ = "fluxhub_users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    is_admin: Mapped[bool] = mapped_column(default=False, nullable=False, server_default="false")
+    is_active: Mapped[bool] = mapped_column(default=True, nullable=False, server_default="true")
+    token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(256))
     created_at: Mapped[datetime] = mapped_column(
@@ -285,3 +288,23 @@ class MercadoLivreListingCancellationSnapshotModel(Base):
     external_id: Mapped[str] = mapped_column(String(100))
     reason: Mapped[str] = mapped_column(String(100))
     canceled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+class MercadoPagoConnectionModel(Base):
+    __tablename__ = "mercado_pago_connections"
+    __table_args__ = (UniqueConstraint("user_id", "mercado_pago_user_id",
+                                       name="uq_mp_connection_user_account"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("fluxhub_users.id", ondelete="CASCADE"), index=True)
+    mercado_pago_user_id: Mapped[str] = mapped_column(String(100), index=True)
+    access_token_encrypted: Mapped[str] = mapped_column(Text)
+    refresh_token_encrypted: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class MercadoPagoOAuthStateModel(Base):
+    __tablename__ = "mercado_pago_oauth_states"
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("fluxhub_users.id", ondelete="CASCADE"), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

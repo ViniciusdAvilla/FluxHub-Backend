@@ -1,55 +1,45 @@
-"""Autenticação servidor-a-servidor para todos os endpoints privados.
-
-O painel Next.js manda Authorization: Bearer <BACKEND_TOKEN> somente no servidor.
-O único endpoint público é GET /api/v1/health para monitoramento de disponibilidade.
-"""
-
+"""Service-to-service authentication; human JWT remains in Authorization."""
 from hmac import compare_digest
-
 from fastapi import FastAPI, Request
 from starlette.responses import JSONResponse
-
 from app.config.settings import settings
 
 
 def protect_fastapi(app: FastAPI) -> None:
     @app.middleware("http")
     async def require_backend_token(request: Request, call_next):
-        # O health check não expõe dados, credenciais nem o contrato da API.
-        if request.method == "GET" and request.url.path == f"{settings.api_prefix}/health":
+        path = request.scope.get("path", request.url.path)
+        root = request.scope.get("root_path", "").rstrip("/")
+        if root and path.startswith(root + "/"):
+            path = path[len(root):]
+        prefix = settings.api_prefix.rstrip("/")
+        public = {
+            f"{prefix}/health",
+            f"{prefix}/connectors/mercado-livre/callback",
+            f"{prefix}/connectors/mercado-pago/callback",
+        }
+        # OAuth callbacks are secure through short-lived one-time server-side state.
+        if request.method == "GET" and path in public:
             return await call_next(request)
 
-        # Sem segredo forte, falhe de forma fechada: nunca exponha o banco por engano.
         secret = settings.backend_token
-        if not secret or len(secret) < 32 or secret.strip() != secret:
-            return JSONResponse(
-                {"detail": "Autenticação do backend não configurada."},
-                status_code=503,
-                headers={"Cache-Control": "no-store"},
-            )
+        if not secret or len(secret) < 32 or secret != secret.strip():
+            return JSONResponse({"detail": "Autenticação do backend não configurada."},
+                                status_code=503, headers={"Cache-Control": "no-store"})
 
+        service_header = request.headers.get("x-backend-token", "")
         authorization = request.headers.get("authorization", "")
-        if not authorization.startswith("Bearer ") or len(authorization) > 4096:
-            return JSONResponse(
-                {"detail": "Não autorizado."},
-                status_code=401,
-                headers={
-                    "WWW-Authenticate": "Bearer",
-                    "Cache-Control": "no-store",
-                },
-            )
+        # Compatibility with the already-deployed Next.js server.
+        # For end-user routes, use X-Backend-Token AND Authorization: Bearer <JWT>.
+        if not service_header and authorization.startswith("Bearer "):
+            service_header = authorization.removeprefix("Bearer ")
 
-        supplied = authorization.removeprefix("Bearer ")
-        if not compare_digest(supplied.encode("utf-8"), secret.encode("utf-8")):
-            return JSONResponse(
-                {"detail": "Não autorizado."},
-                status_code=401,
-                headers={
-                    "WWW-Authenticate": "Bearer",
-                    "Cache-Control": "no-store",
-                },
-            )
-
+        valid = (0 < len(service_header) <= 4096 and
+                 compare_digest(service_header.encode(), secret.encode()))
+        if not valid:
+            return JSONResponse({"detail": "Não autorizado."}, status_code=401,
+                                headers={"WWW-Authenticate": "Bearer",
+                                         "Cache-Control": "no-store"})
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         return response
