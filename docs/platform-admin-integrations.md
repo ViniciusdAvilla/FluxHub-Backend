@@ -71,3 +71,15 @@
 - Migração de legado adiciona company_id/source_key a products quando ausentes;
   registros antigos continuam sem tenant e não são mostrados a clientes até
   associação explícita segura ou nova importação.
+
+## PostgreSQL NOVO (sem migração SQLite)
+- Configure PostgreSQL 16+; DATABASE_URL PostgreSQL é obrigatória em TODOS os ambientes.
+- Crie um banco limpo e aplique `python -m scripts.migrate_platform` uma única vez
+  após verificar o alvo e as credenciais. Nada é importado de arquivos *.db.
+- O frontend passará a consumir custos e produtos do backend FastAPI; não escreva
+  em `finance.sqlite` nem em `middleware_ecommerce.db`.
+- Antes de desativar/remover SQLite na VPS, certifique-se de que o frontend novo
+  já faz login no backend e de que o PostgreSQL possui dados válidos.
+- Nova rota GET /api/v1/analytics/timeline?days=30 agrega pedidos reais salvos e
+  visitas diárias retornadas pela API oficial do Mercado Livre. Sem séries sintéticas.
+- O sincronizador HTTP permanece paginado, não é um worker periódico automático.

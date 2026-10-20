@@ -15,9 +15,23 @@ jobs:
     timeout-minutes: 15
     env:
       ENVIRONMENT: test
-      DATABASE_URL: sqlite:////tmp/fluxhub-platform-tests.db
+      DATABASE_URL: postgresql+psycopg://fluxhub:ci_password@127.0.0.1:5432/fluxhub_test
       BACKEND_TOKEN: test_service_token_aaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       JWT_SECRET_KEY: test_jwt_secret_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: fluxhub
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: fluxhub_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fluxhub -d fluxhub_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,4 +39,4 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install -r requirements.txt
       - run: python -m compileall -q app scripts
-      - run: python -m pytest -q tests/test_api_auth.py tests/test_platform.py
+      - run: python -m pytest -q tests/test_api_auth.py tests/test_platform.py tests/test_postgresql_runtime.py
