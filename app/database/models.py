@@ -308,3 +308,20 @@ class MercadoPagoOAuthStateModel(Base):
     state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("fluxhub_users.id", ondelete="CASCADE"), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MercadoLivreVisitDailySnapshotModel(Base):
+    """Daily seller-account visits from official /items_visits/time_window."""
+    __tablename__ = "mercado_livre_visit_daily_snapshots"
+    __table_args__ = (
+        UniqueConstraint("user_id", "mercado_livre_user_id", "report_date",
+                         name="uq_ml_visit_user_account_day"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("fluxhub_users.id", ondelete="CASCADE"), index=True)
+    mercado_livre_user_id: Mapped[int] = mapped_column(Integer, index=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    total_visits: Mapped[int] = mapped_column(Integer, default=0)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

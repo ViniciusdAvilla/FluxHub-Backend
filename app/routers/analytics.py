@@ -12,6 +12,7 @@ from app.database.models import (
     MercadoLivreOrderSnapshotModel as Order,
     MercadoLivreProductCostModel as Cost,
     MercadoLivreAdsDailySnapshotModel as Ads,
+    MercadoLivreVisitDailySnapshotModel as Visits,
 )
 from app.database.session import get_db
 from app.routers.mercado_livre import get_account, seller_request
@@ -95,10 +96,12 @@ def import_costs(body: CostImport,
 
 
 @router.get("/product-costs")
-def list_costs(user: UserModel = Depends(get_current_user),
+def list_costs(limit: int = Query(default=500, ge=1, le=1000),
+               offset: int = Query(default=0, ge=0),
+               user: UserModel = Depends(get_current_user),
                db: Session = Depends(get_db)):
     rows = db.scalars(select(Cost).where(Cost.user_id == user.id)
-                      .order_by(Cost.external_id).limit(1000)).all()
+                      .order_by(Cost.external_id).offset(offset).limit(limit)).all()
     return [{"external_id": c.external_id, "unit_cost": c.unit_cost,
              "manufacturer": c.manufacturer,
              "marketplace_fee_percent": c.marketplace_fee_percent,
@@ -233,13 +236,44 @@ async def sync(account_id: int | None = None,
         row.created_at = parse_date(item.get("date_created"))
         row.is_cancelled = row.status == "cancelled"
         saved_orders += 1
+    # Official seller-wide daily visits; only persist data returned by ML.
+    # The optional metric must never block order/listing synchronization.
+    visits_synced = 0
+    visits_error = False
+    try:
+        visitor_data = await seller_request(
+            db, account,
+            f"/users/{seller_id}/items_visits/time_window",
+            {"last": 30, "unit": "day"})
+        for entry in visitor_data.get("results", []):
+            if not isinstance(entry, dict) or entry.get("total") is None:
+                continue
+            day = date.fromisoformat(str(entry.get("date", ""))[:10])
+            count = int(entry["total"])
+            if count < 0:
+                continue
+            record = db.scalar(select(Visits).where(
+                Visits.user_id == user.id,
+                Visits.mercado_livre_user_id == seller_id,
+                Visits.report_date == day))
+            if record is None:
+                record = Visits(user_id=user.id, mercado_livre_user_id=seller_id,
+                                report_date=day)
+                db.add(record)
+            record.total_visits = count
+            record.captured_at = now()
+            visits_synced += 1
+    except (HTTPException, TypeError, ValueError, OverflowError):
+        visits_error = True
     source.last_synced_at = now()
     source.status_message = f"{imported} anúncios e {saved_orders} pedidos nesta página."
     db.commit()
     return {"source": source_key, "listings": imported,
             "orders": saved_orders, "offset": offset,
             "limit": limit, "next_offset": offset + limit if len(ids) == limit else None,
-            "partial": True, "ads_data_synced": False}
+            "partial": True, "ads_data_synced": False,
+            "visit_days_synced": visits_synced,
+            "visits_unavailable": visits_error}
 
 
 @router.get("/ads-performance")
@@ -338,3 +372,45 @@ def profitability(days: int = Query(default=30, ge=1, le=365),
             if is_complete and spend else None,
             "incomplete_external_ids": sorted(set(incomplete)),
             "profit_complete": is_complete}
+
+
+@router.get("/timeline")
+def timeline(days: int = Query(default=30, ge=1, le=90),
+             account_id: int | None = None,
+             user: UserModel = Depends(get_current_user),
+             db: Session = Depends(get_db)):
+    """Actual daily order snapshots and ML visits, no invented zero-filled days."""
+    seller = account_id
+    if seller is not None:
+        get_account(db, user.id, seller)
+    threshold = date.today() - timedelta(days=days)
+    order_query = select(Order).where(Order.user_id == user.id,
+                                      Order.created_at >= now() - timedelta(days=days))
+    visit_query = select(Visits).where(Visits.user_id == user.id,
+                                       Visits.report_date >= threshold)
+    if seller is not None:
+        order_query = order_query.where(Order.mercado_livre_user_id == seller)
+        visit_query = visit_query.where(Visits.mercado_livre_user_id == seller)
+    orders = db.scalars(order_query).all()
+    visits = db.scalars(visit_query).all()
+    daily = defaultdict(lambda: {"orders": 0, "cancelled_orders": 0,
+                                 "gross_non_cancelled": 0.0, "visits": None})
+    for order in orders:
+        day = order.created_at.date().isoformat()
+        daily[day]["orders"] += 1
+        if order.is_cancelled:
+            daily[day]["cancelled_orders"] += 1
+        else:
+            daily[day]["gross_non_cancelled"] += order.total_amount
+    for visit in visits:
+        day = visit.report_date.isoformat()
+        daily[day]["visits"] = (daily[day]["visits"] or 0) + visit.total_visits
+    return {"days": days, "partial_data": True,
+            "seller_id": seller,
+            "data": [
+                {"date": day, **{key: round(value, 2)
+                 if key == "gross_non_cancelled" else value
+                 for key, value in measures.items()}}
+                for day, measures in sorted(daily.items())
+            ],
+            "note": "Histórico limitado às páginas de pedidos sincronizadas; visitas reais quando disponíveis."}

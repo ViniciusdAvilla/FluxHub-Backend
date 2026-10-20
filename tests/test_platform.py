@@ -5,7 +5,8 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import text
+import os
 
 from app.config.settings import settings
 from app.core.security import hash_password
@@ -16,8 +17,8 @@ from app.main import app
 
 @pytest.fixture
 def client(monkeypatch):
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
-                           poolclass=StaticPool)
+    engine = create_engine(os.environ["DATABASE_URL"])
+    Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(settings, "backend_token", "s" * 48)
@@ -38,6 +39,7 @@ def client(monkeypatch):
     with TestClient(app) as c:
         yield c, Session
     app.dependency_overrides.clear()
+    Base.metadata.drop_all(engine)
     engine.dispose()
 
 

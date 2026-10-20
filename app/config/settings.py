@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     app_version: str = "1.0.0"
     api_prefix: str = "/api/v1"
     environment: str = "development"
-    database_url: str = "sqlite:///middleware_ecommerce.db"
+    database_url: str = ""
     jwt_secret_key: SecretStr | None = None
     mercado_livre_client_id: SecretStr | None = None
     mercado_livre_client_secret: SecretStr | None = None
@@ -32,13 +32,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_settings(self):
+        if not self.database_url.startswith("postgresql+psycopg://"):
+            raise ValueError("FluxHub requires PostgreSQL DATABASE_URL.")
         if self.environment.lower() == "production":
-            if not self.database_url.startswith("postgresql+psycopg://"):
-                raise ValueError("Production requires a PostgreSQL DATABASE_URL.")
             required_secrets = {
                 "JWT_SECRET_KEY": self.jwt_secret_key,
-                "MERCADO_LIVRE_CLIENT_ID": self.mercado_livre_client_id,
-                "MERCADO_LIVRE_CLIENT_SECRET": self.mercado_livre_client_secret,
                 "TOKEN_ENCRYPTION_KEY": self.token_encryption_key,
             }
             missing = [
