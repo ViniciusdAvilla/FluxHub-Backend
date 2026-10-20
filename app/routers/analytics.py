@@ -136,7 +136,7 @@ def import_ads_reports(body: AdsImport, user: UserModel = Depends(get_current_us
 @router.post("/sync")
 async def sync(account_id: int | None = None,
                offset: int = Query(default=0, ge=0, le=1000),
-               limit: int = Query(default=50, ge=1, le=50),
+               limit: int = Query(default=20, ge=1, le=20),
                user: UserModel = Depends(get_current_user),
                db: Session = Depends(get_db)):
     account = get_account(db, user.id, account_id)
@@ -213,9 +213,16 @@ async def sync(account_id: int | None = None,
         imported += 1
 
     # Orders are independently paginated; do not assert this captures all history.
-    orders_page = await seller_request(db, account, "/orders/search", {
-        "seller": seller_id, "limit": limit, "offset": offset,
-        "sort": "date_desc"})
+    # Se o vendedor não concedeu escopo de pedidos ou a API falhou,
+    # a importação de anúncios não deve ser descartada. Indique a falha.
+    orders_unavailable = False
+    try:
+        orders_page = await seller_request(db, account, "/orders/search", {
+            "seller": seller_id, "limit": limit, "offset": offset,
+            "sort": "date_desc"})
+    except HTTPException:
+        orders_page = {"results": []}
+        orders_unavailable = True
     saved_orders = 0
     for item in orders_page.get("results", []):
         if not isinstance(item, dict) or not item.get("id"):
@@ -266,14 +273,16 @@ async def sync(account_id: int | None = None,
     except (HTTPException, TypeError, ValueError, OverflowError):
         visits_error = True
     source.last_synced_at = now()
-    source.status_message = f"{imported} anúncios e {saved_orders} pedidos nesta página."
+    source.status_message = (f"{imported} anúncios e {saved_orders} pedidos nesta página."
+                             + (" Consulta de pedidos indisponível." if orders_unavailable else ""))
     db.commit()
     return {"source": source_key, "listings": imported,
             "orders": saved_orders, "offset": offset,
             "limit": limit, "next_offset": offset + limit if len(ids) == limit else None,
             "partial": True, "ads_data_synced": False,
             "visit_days_synced": visits_synced,
-            "visits_unavailable": visits_error}
+            "visits_unavailable": visits_error,
+            "orders_unavailable": orders_unavailable}
 
 
 @router.get("/ads-performance")

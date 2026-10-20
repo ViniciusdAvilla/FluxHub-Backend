@@ -11,8 +11,10 @@ class Settings(BaseSettings):
     jwt_secret_key: SecretStr | None = None
     mercado_livre_client_id: SecretStr | None = None
     mercado_livre_client_secret: SecretStr | None = None
+    # Ativar somente se o aplicativo Mercado Livre usa PKCE.
+    mercado_livre_pkce_enabled: bool = False
     mercado_livre_redirect_uri: str = (
-        "https://myfluxhub.tech/backend-api/api/v1/connectors/mercado-livre/callback"
+        "https://myfluxhub.tech/api/v1/connectors/mercado-livre/callback"
     )
     mercado_pago_client_id: SecretStr | None = None
     mercado_pago_client_secret: SecretStr | None = None
