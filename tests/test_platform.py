@@ -220,6 +220,21 @@ def test_sync_imports_real_listing_and_order_into_postgresql(client, monkeypatch
                        headers=headers).json()
     assert diagnostic["accounts"][0]["last_synced_at"] is not None
 
+    from fastapi import HTTPException
+
+    async def orders_unavailable(db, connection, path, params=None):
+        if path == "/orders/search":
+            raise HTTPException(502, "Mercado Livre indisponível.")
+        return await fake_seller_request(db, connection, path, params)
+
+    monkeypatch.setattr("app.routers.analytics.seller_request", orders_unavailable)
+    partial = c.post("/api/v1/analytics/sync",
+                     params={"account_id": 34567}, headers=headers)
+    assert partial.status_code == 200, partial.text
+    assert partial.json()["limit"] == 20
+    assert partial.json()["listings"] == 1
+    assert partial.json()["orders_unavailable"] is True
+
 
 def test_ml_diagnostics_requires_user_authentication(client):
     c, _ = client
