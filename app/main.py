@@ -8,7 +8,9 @@ from app.routers.indicators import router as indicators_router
 from app.routers.stock import router as stock_router
 from app.routers.sales import router as sales_router
 from app.routers.dashboard import router as dashboard_router
-
+from app.routers.auth import router as auth_router
+from app.routers.connectors import router as connectors_router
+from app.routers.analytics import router as analytics_router
 
 
 app = FastAPI(
@@ -43,5 +45,20 @@ app.include_router(
 
 app.include_router(
     dashboard_router,
+    prefix=settings.api_prefix,
+)
+
+app.include_router(
+    auth_router,
+    prefix=settings.api_prefix,
+)
+
+app.include_router(
+    connectors_router,
+    prefix=settings.api_prefix,
+)
+
+app.include_router(
+    analytics_router,
     prefix=settings.api_prefix,
 )

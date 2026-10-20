@@ -1,49 +1,25 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.connectors.mercado_livre.orders import MercadoLivreOrders
-from app.schemas.order import Order
-from app.services.orders import OrderService
-
-
-router = APIRouter(
-    prefix="/orders",
-    tags=["Orders"]
-)
+from app.core.auth import get_current_user
+from app.database.models import UserModel
 
 
-class FakeMercadoLivreOrderClient:
-
-    async def get(self, endpoint: str):
-        return {
-            "id": "2000001234567890",
-            "status": "paid",
-            "total_amount": 349.90,
-        }
+router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
-@router.get("/{order_id}", response_model=Order)
-async def get_order(order_id: str):
-
-    client = FakeMercadoLivreOrderClient()
-
-    connector = MercadoLivreOrders(client)
-
-    service = OrderService(connector)
-
-    return await service.get_order(order_id)
+@router.get("/{order_id}")
+async def get_order(
+    order_id: str, _current_user: UserModel = Depends(get_current_user)
+):
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Dados de pedidos reais ainda não estão disponíveis nesta integração.",
+    )
 
 
 @router.get("/")
-async def list_orders():
-    return [
-        {
-            "external_id": "2000001",
-            "status": "paid",
-            "total_amount": 349.90
-        },
-        {
-            "external_id": "2000002",
-            "status": "shipped",
-            "total_amount": 199.90
-        }
-    ]
+async def list_orders(_current_user: UserModel = Depends(get_current_user)):
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Dados de pedidos reais ainda não estão disponíveis nesta integração.",
+    )

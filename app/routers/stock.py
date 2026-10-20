@@ -1,20 +1,15 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, status
 
-router = APIRouter(
-    prefix="/stock",
-    tags=["Stock"]
-)
+from app.core.auth import get_current_user
+from app.database.models import UserModel
+
+
+router = APIRouter(prefix="/stock", tags=["Stock"])
+
 
 @router.get("/")
-async def get_stock():
-
-    return [
-        {
-            "product_id": "MLB001",
-            "available_quantity": 20
-        },
-        {
-            "product_id": "MLB002",
-            "available_quantity": 8
-        }
-    ]
+async def get_stock(_current_user: UserModel = Depends(get_current_user)):
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="O estoque real ainda não foi sincronizado para esta empresa.",
+    )

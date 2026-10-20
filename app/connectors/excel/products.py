@@ -7,16 +7,23 @@ from app.connectors.base.connector import ProductSource
 
 
 class ExcelProducts(ProductSource):
-
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, sheet_name: str = "Produtos_Ads"):
         self.file_path = Path(file_path)
+        self.sheet_name = sheet_name
 
     def get_products(self) -> list[Product]:
-
         dataframe = pd.read_excel(
             self.file_path,
-            sheet_name="Produtos_ML"
+            sheet_name=self.sheet_name,
+            engine="openpyxl",
         )
+
+        # Manter o mapeamento atual e acrescentar os novos campos
+        # ao schema Product e à persistência antes de importá-los.
+    
+
+        print(f"Arquivo: {self.file_path}")
+        print(f"Linhas carregadas: {len(dataframe)}")
 
         products = []
 

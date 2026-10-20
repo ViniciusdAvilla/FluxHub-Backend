@@ -8,7 +8,14 @@ from app.routers.indicators import router as indicators_router
 from app.routers.stock import router as stock_router
 from app.routers.sales import router as sales_router
 from app.routers.dashboard import router as dashboard_router
+from app.routers.anuncios import router as anuncios_router
+from app.routers.cancelamentos import router as cancelamentos_router
 
+app.include_router(stock_router, prefix=settings.api_prefix)
+app.include_router(sales_router, prefix=settings.api_prefix)
+
+app.include_router(anuncios_router, prefix=settings.api_prefix)
+app.include_router(cancelamentos_router, prefix=settings.api_prefix)
 
 
 app = FastAPI(

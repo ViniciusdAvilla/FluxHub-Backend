@@ -1,13 +1,15 @@
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.database.models import ProductModel
+from app.database.models import CompanyDataSourceModel, ProductModel
 from app.schemas.product import Product
 
 
 class ProductRepository:
 
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, company_id: int | None = None):
         self.session = session
+        self.company_id = company_id
 
     def save(self, product: Product) -> ProductModel:
 
@@ -32,90 +34,137 @@ class ProductRepository:
 
         return product_model
 
-        
-    def get_all(self):
+    def save_many(
+        self,
+        products: list[Product],
+        source_key: str = "legacy",
+    ) -> int:
+            try:
+                existing = self.session.query(ProductModel)
+                if self.company_id is None:
+                    existing = existing.filter(ProductModel.company_id.is_(None))
+                else:
+                    existing = existing.filter(
+                        ProductModel.company_id == self.company_id
+                    )
+                existing.filter(ProductModel.source_key == source_key).delete(
+                    synchronize_session=False
+                )
 
-        return self.session.query(
-            ProductModel
-        ).all()
+                product_models = []
 
-    def count_products(self) -> int:
+                for product in products:
+                    product_model = ProductModel(
+                        external_id=product.external_id,
+                        company_id=self.company_id,
+                        source_key=source_key,
+                        title=product.title,
+                        category=product.category,
+                        brand=product.brand,
+                        original_price=product.original_price,
+                        promotional_price=product.promotional_price,
+                        discount_rate=product.discount_rate,
+                        stock_qty=product.stock_qty,
+                        sales_30d=product.sales_30d,
+                        rating=product.rating,
+                        is_free_shipping=product.is_free_shipping,
+                        item_condition=product.item_condition,
+                    )
 
-        total = self.session.query(
-            ProductModel
-        ).count()
+                    product_models.append(product_model)
 
-        return total
+                self.session.add_all(product_models)
+                self.session.commit()
 
+                return len(product_models)
+
+            except Exception:
+                self.session.rollback()
+                raise
+
+    def get_all(self) -> list[ProductModel]:
+        query = self.session.query(ProductModel)
+        if self.company_id is None:
+            return query.all()
+
+        enabled_sources = select(CompanyDataSourceModel.account_key).where(
+            CompanyDataSourceModel.company_id == self.company_id,
+            CompanyDataSourceModel.enabled.is_(True),
+        )
+        products = query.filter(
+            ProductModel.company_id == self.company_id,
+            ProductModel.source_key.in_(enabled_sources),
+        ).order_by(ProductModel.id).all()
+        unique_products: dict[str, ProductModel] = {}
+        for product in products:
+            unique_products.setdefault(product.external_id, product)
+        return list(unique_products.values())
 
     def get_indicators(self):
 
         products = self.get_all()
 
+        if not products:
+            return {
+                "total_products": 0,
+                "avg_original_price": None,
+                "avg_promotional_price": None,
+                "avg_discount": None,
+                "total_stock": 0,
+                "avg_rating": None,
+            }
+        def average(values: list[float | int | None]) -> float | None:
+            known = [value for value in values if value is not None]
+            return sum(known) / len(known) if known else None
+
         return {
-        "total_products": len(products),
-        "avg_original_price": (
-            sum(p.original_price for p in products)
-            / len(products)
-        ),
-        "avg_promotional_price": (
-            sum(p.promotional_price for p in products)
-            / len(products)
-        ),
-        "avg_discount": (
-            sum(p.discount_rate for p in products)
-            / len(products)
-        ),
-        "total_stock": (
-            sum(p.stock_qty for p in products)
-        ),
-        "avg_rating": (
-            sum(p.rating for p in products)
-            / len(products)
-        ),
-    }
+            "total_products": len(products),
+            "avg_original_price": average(
+                [product.original_price for product in products]
+            ),
+            "avg_promotional_price": average(
+                [product.promotional_price for product in products]
+            ),
+            "avg_discount": average(
+                [product.discount_rate for product in products]
+            ),
+            "total_stock": (
+                sum(product.stock_qty for product in products)
+                if all(product.stock_qty is not None for product in products)
+                else None
+            ),
+            "avg_rating": average([product.rating for product in products]),
+        }
 
     def get_top_discount(self, limit: int = 10):
-
-        return (
-        self.session.query(ProductModel)
-        .order_by(
-            ProductModel.discount_rate.desc()
-        )
-        .limit(limit)
-        .all()
-    )
+        return sorted(
+            self.get_all(),
+            key=lambda product: (
+                product.discount_rate
+                if product.discount_rate is not None
+                else float("-inf")
+            ),
+            reverse=True,
+        )[:limit]
 
     def count_products(self) -> int:
 
-        return self.session.query(
-        ProductModel
-        ).count()
+        return len(self.get_all())
 
 
 
     def get_top_stock(
         self, limit: int = 10):
+        return sorted(
+            self.get_all(),
+            key=lambda product: (
+                product.stock_qty
+                if product.stock_qty is not None
+                else float("-inf")
+            ),
+            reverse=True,
+        )[:limit]
 
-        return (self.session.query(
-                ProductModel
-            )
-            .order_by(
-                ProductModel.stock_qty.desc()
-            )
-            .limit(limit)
-            .all()
-        )
-
-    def get_top_discount(self, limit: int = 10):
-
-        return (self.session.query(ProductModel)
-            .order_by(
-                ProductModel.discount_rate.desc()
-            )
-            .limit(limit)
-            .all()
-        )
     def get_catalog_health(self):
 
         products = self.get_all()
@@ -123,27 +172,27 @@ class ProductRepository:
         return {
         "out_of_stock": len([
             p for p in products
-            if p.stock_qty == 0
+            if p.stock_qty is not None and p.stock_qty == 0
         ]),
 
         "low_stock": len([
             p for p in products
-            if p.stock_qty <= 10
+            if p.stock_qty is not None and p.stock_qty <= 10
         ]),
 
         "low_rating": len([
             p for p in products
-            if p.rating < 4.0
+            if p.rating is not None and p.rating < 4.0
         ]),
 
         "without_discount": len([
             p for p in products
-            if p.discount_rate == 0
+            if p.discount_rate is not None and p.discount_rate == 0
         ]),
 
         "without_free_shipping": len([
             p for p in products
-            if not p.is_free_shipping
+            if p.is_free_shipping is False
         ]),
 
         "without_category": len([
@@ -158,7 +207,7 @@ class ProductRepository:
 
         "used_products": len([
             p for p in products
-            if p.item_condition != "new"
+            if p.item_condition and p.item_condition != "new"
         ])
     }
 
@@ -262,7 +311,7 @@ class ProductRepository:
                 "stock_qty": product.stock_qty
             }
             for product in self.get_all()
-            if product.stock_qty <= threshold
+            if product.stock_qty is not None and product.stock_qty <= threshold
         ]
 
     def get_low_rating(
@@ -279,7 +328,7 @@ class ProductRepository:
                 "rating": product.rating
             }
             for product in self.get_all()
-            if product.rating < threshold
+            if product.rating is not None and product.rating < threshold
         ]           
 
     def get_top_rated(
@@ -288,8 +337,8 @@ class ProductRepository:
     ):
 
         products = sorted(
-            self.get_all(),
-            key=lambda p: p.rating,
+            (product for product in self.get_all() if product.rating is not None),
+            key=lambda p: p.rating if p.rating is not None else float("-inf"),
             reverse=True
         )
 

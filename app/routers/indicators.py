@@ -1,22 +1,15 @@
-from fastapi import APIRouter
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.database.connection import engine
-from app.database.repositories.products import ProductRepository
-from app.services.indicators import IndicatorService
+from app.core.auth import get_current_user
+from app.database.models import UserModel
 
 
-router = APIRouter(
-    prefix="/indicators",
-    tags=["Indicators"]
-)
+router = APIRouter(prefix="/indicators", tags=["Indicators"])
+
 
 @router.get("/")
-async def get_indicators():
-
-    return {
-        "total_orders": 125,
-        "total_revenue": 32549.90,
-        "average_ticket": 260.40,
-        "products_sold": 412
-    }
+async def get_indicators(_current_user: UserModel = Depends(get_current_user)):
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Indicadores de pedidos só serão exibidos após sincronização de vendas reais.",
+    )
