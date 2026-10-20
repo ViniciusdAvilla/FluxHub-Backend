@@ -1,5 +1,6 @@
 """Per-tenant Mercado Livre OAuth and read-only seller endpoints."""
 from datetime import datetime, timezone, timedelta
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ import httpx
 from app.core.auth import get_current_user
 from app.core.oauth_state import consume_state, issue_state
 from app.core.security import encrypt_token
+from app.config.settings import settings
 from app.database.session import get_db
 from app.database.models import (
     UserModel, MercadoLivreConnectionModel, MercadoLivreOAuthStateModel,
@@ -19,6 +21,7 @@ from app.connectors.mercado_livre.auth import (
 )
 
 router = APIRouter(prefix="/connectors/mercado-livre", tags=["Mercado Livre"])
+logger = logging.getLogger(__name__)
 
 
 def get_account(db: Session, user_id: int, account_id: int | None):
@@ -69,7 +72,7 @@ async def callback(state: str = Query(min_length=16, max_length=200),
     if error or not code:
         raise HTTPException(400, "Autorização Mercado Livre não concluída.")
     try:
-        tokens = await exchange_authorization_code(code)
+        tokens = await exchange_authorization_code(code, state)
         profile = await fetch_profile(str(tokens["access_token"]))
         seller_id = int(tokens["user_id"])
         if seller_id != int(profile["id"]):
@@ -102,9 +105,20 @@ async def callback(state: str = Query(min_length=16, max_length=200),
         db.commit()
         return {"connected": True, "provider": "mercado_livre",
                 "account_id": seller_id}
-    except (httpx.HTTPError, MercadoLivreOAuthError, RuntimeError, ValueError, KeyError):
+    except (httpx.HTTPError, MercadoLivreOAuthError, RuntimeError, ValueError, KeyError) as error:
         db.rollback()
-        raise HTTPException(502, "Falha ao concluir a autorização Mercado Livre.")
+        # Sem code/state/tokens: detalhes seguros apenas em logs privados do serviço.
+        if isinstance(error, MercadoLivreOAuthError):
+            logger.warning(
+                "[mercado-livre-oauth] callback_failed phase=%s status=%s provider_error=%s",
+                error.phase, error.http_status or "unknown", error.provider_error,
+            )
+        else:
+            logger.warning(
+                "[mercado-livre-oauth] callback_failed phase=storage_or_configuration error_type=%s",
+                type(error).__name__,
+            )
+        raise HTTPException(502, "Falha ao concluir a autorização Mercado Livre.") from None
 
 
 @router.get("")
@@ -114,6 +128,42 @@ def status(user: UserModel = Depends(get_current_user), db: Session = Depends(ge
     return [{"account_id": c.mercado_livre_user_id,
              "nickname": c.nickname, "expires_at": c.expires_at,
              "connected": True} for c in rows]
+
+
+@router.get("/diagnostics")
+def diagnostics(user: UserModel = Depends(get_current_user),
+                db: Session = Depends(get_db)):
+    """Diagnóstico por usuário: nunca responde com credenciais ou tokens."""
+    accounts = db.scalars(select(MercadoLivreConnectionModel).where(
+        MercadoLivreConnectionModel.user_id == user.id)).all()
+    sources = db.scalars(select(CompanyDataSourceModel).where(
+        CompanyDataSourceModel.company_id == user.id,
+        CompanyDataSourceModel.provider == "mercado_livre")).all()
+    sources_by_key = {s.account_key: s for s in sources}
+    return {
+        "app_credentials_configured": bool(
+            settings.mercado_livre_client_id
+            and settings.mercado_livre_client_id.get_secret_value()
+            and settings.mercado_livre_client_secret
+            and settings.mercado_livre_client_secret.get_secret_value()
+        ),
+        "redirect_uri": settings.mercado_livre_redirect_uri,
+        "pkce_enabled": settings.mercado_livre_pkce_enabled,
+        "connection_count": len(accounts),
+        "accounts": [
+            {
+                "seller_id": a.mercado_livre_user_id,
+                "nickname": a.nickname,
+                "token_expires_at": a.expires_at,
+                "source_exists": (source := sources_by_key.get(
+                    f"ml:{a.mercado_livre_user_id}")) is not None,
+                "source_connected": bool(source and source.connected),
+                "source_enabled": bool(source and source.enabled),
+                "last_synced_at": source.last_synced_at if source else None,
+            }
+            for a in accounts
+        ],
+    }
 
 
 @router.get("/profile")
