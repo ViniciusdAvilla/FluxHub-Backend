@@ -4,6 +4,9 @@ from app.config.settings import settings
 from app.core.api_auth import protect_fastapi
 from app.routers.auth import router as auth_router
 from app.routers.admin import router as admin_router
+from app.routers.connectors import router as connectors_router
+from app.routers.mercado_livre import router as mercado_livre_router
+from app.routers.mercado_pago import router as mercado_pago_router
 from app.routers.health import router as health_router
 from app.routers.products import router as products_router
 from app.routers.orders import router as orders_router
@@ -21,6 +24,9 @@ app = FastAPI(
 
 app.include_router(auth_router, prefix=settings.api_prefix)
 app.include_router(admin_router, prefix=settings.api_prefix)
+app.include_router(connectors_router, prefix=settings.api_prefix)
+app.include_router(mercado_livre_router, prefix=settings.api_prefix)
+app.include_router(mercado_pago_router, prefix=settings.api_prefix)
 
 app.include_router(
     health_router,

@@ -119,7 +119,7 @@ async def _request_token(payload: dict) -> dict:
     }
     async with httpx.AsyncClient(timeout=20) as client:
         try:
-            response = await client.post(TOKEN_URL, json=body)
+            response = await client.post(TOKEN_URL, data=body)
             response.raise_for_status()
         except httpx.HTTPError as error:
             raise MercadoLivreOAuthError(
