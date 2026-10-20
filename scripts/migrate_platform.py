@@ -16,6 +16,8 @@ def main():
                 conn.execute(text("ALTER TABLE fluxhub_users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE"))
             if "is_active" not in fields:
                 conn.execute(text("ALTER TABLE fluxhub_users ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE"))
+            if "token_version" not in fields:
+                conn.execute(text("ALTER TABLE fluxhub_users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"))
     Base.metadata.create_all(engine)
     print("Esquema atualizado (sem remover tabelas existentes).")
 

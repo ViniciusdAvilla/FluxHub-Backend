@@ -2,7 +2,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from app.core.security import decode_access_token
+from app.core.security import decode_access_token_claims
 from app.database.models import UserModel
 from app.database.session import get_db
 
@@ -22,7 +22,7 @@ def get_current_user(
     if credentials is None:
         raise unauthorized
     try:
-        user_id = decode_access_token(credentials.credentials)
+        user_id, version = decode_access_token_claims(credentials.credentials)
     except RuntimeError as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -32,6 +32,6 @@ def get_current_user(
         raise unauthorized from error
 
     user = db.get(UserModel, user_id)
-    if user is None or not user.is_active:
+    if user is None or not user.is_active or user.token_version != version:
         raise unauthorized
     return user

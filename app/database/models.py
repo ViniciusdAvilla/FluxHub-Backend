@@ -71,6 +71,7 @@ class UserModel(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     is_admin: Mapped[bool] = mapped_column(default=False, nullable=False, server_default="false")
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False, server_default="true")
+    token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(256))
     created_at: Mapped[datetime] = mapped_column(

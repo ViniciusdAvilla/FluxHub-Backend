@@ -77,12 +77,17 @@ def test_admin_user_lifecycle_and_isolation(client):
     admin_products = c.get("/api/v1/products/", headers=admin_headers)
     assert admin_products.status_code == 200
     assert admin_products.json() == []
+    changed = c.post(f"/api/v1/admin/users/{user_id}/reset-password",
+                     headers=admin_headers, json={"password": "NewClientPassw0rd!"})
+    assert changed.status_code == 200
+    assert c.get("/api/v1/auth/me", headers=client_headers).status_code == 401
+    client_headers = login(c, "client1@example.com", "NewClientPassw0rd!")
     disabled = c.patch(f"/api/v1/admin/users/{user_id}/status", headers=admin_headers,
                        json={"is_active": False})
     assert disabled.status_code == 200
     assert c.get("/api/v1/products/", headers=client_headers).status_code == 401
     assert c.post("/api/v1/auth/login", headers=svc(), json={
-        "email": "client1@example.com", "password": "ClientPassw0rd! "}).status_code == 401
+        "email": "client1@example.com", "password": "NewClientPassw0rd!"}).status_code == 401
 
 
 def test_mercado_livre_state_bound_to_user_and_one_time(client, monkeypatch):

@@ -86,6 +86,7 @@ def reset_password(user_id: int, body: ResetPassword,
     if not user:
         raise HTTPException(404, "Usuário não encontrado.")
     user.password_hash = hash_password(body.password)
+    user.token_version += 1
     db.commit()
     return {"ok": True}
 
