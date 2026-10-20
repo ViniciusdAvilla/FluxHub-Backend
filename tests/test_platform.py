@@ -154,3 +154,74 @@ def test_mercado_pago_callback_and_account_isolation(client, monkeypatch):
     assert callback.status_code == 200, callback.text
     assert callback.json()["account_id"] == "12345678"
     assert c.get("/api/v1/connectors/mercado-pago", headers=admin_headers).json()[0]["connected"]
+
+
+
+def test_sync_imports_real_listing_and_order_into_postgresql(client, monkeypatch):
+    """O dashboard depende dos registros persistidos, não de rotas 200 vazias."""
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    from app.database.models import MercadoLivreConnectionModel, MercadoLivreOrderSnapshotModel
+    from datetime import datetime, timezone
+    from app.core.security import encrypt_token
+    with Session() as db:
+        admin = db.scalar(select(UserModel).where(UserModel.email == "admin@example.com"))
+        db.add(MercadoLivreConnectionModel(
+            user_id=admin.id, mercado_livre_user_id=34567,
+            nickname="Loja de teste",
+            access_token_encrypted=encrypt_token("fake-access"),
+            refresh_token_encrypted=encrypt_token("fake-refresh"),
+            expires_at=datetime.now(timezone.utc),
+        ))
+        db.add(CompanyDataSourceModel(
+            company_id=admin.id, provider="mercado_livre",
+            account_key="ml:34567", display_name="Loja de teste",
+            enabled=True, connected=True,
+        ))
+        db.commit()
+
+    calls = []
+    async def fake_seller_request(db, connection, path, params=None):
+        calls.append(path)
+        if path.endswith("/items/search"):
+            return {"results": ["MLB123456789"], "paging": {"total": 1}}
+        if path == "/items/bulk":
+            return [{"status_code": 200, "body": {
+                "id": "MLB123456789", "seller_id": 34567,
+                "title": "Produto real", "status": "active",
+                "price": 49.90, "category_id": "MLB1234",
+                "available_quantity": 12, "attributes": [],
+            }}]
+        if path == "/orders/search":
+            return {"results": [{
+                "id": 987654, "seller": {"id": 34567}, "status": "paid",
+                "total_amount": 49.90, "date_created": "2026-10-20T12:00:00Z",
+            }]}
+        if path.endswith("/items_visits/time_window"):
+            return {"results": []}
+        raise AssertionError("Caminho inesperado: " + path)
+
+    monkeypatch.setattr("app.routers.analytics.seller_request", fake_seller_request)
+    result = c.post("/api/v1/analytics/sync",
+                    params={"account_id": 34567, "limit": 20, "offset": 0},
+                    headers=headers)
+    assert result.status_code == 200, result.text
+    assert result.json()["listings"] == 1
+    assert result.json()["orders"] == 1
+    assert result.json()["next_offset"] is None
+    assert "/items/bulk" in calls
+    products = c.get("/api/v1/products/", headers=headers).json()
+    assert len(products) == 1
+    assert products[0]["external_id"] == "MLB123456789"
+    orders = c.get("/api/v1/orders/", headers=headers).json()
+    assert len(orders) == 1
+    assert str(orders[0]["external_id"]) == "987654"
+    diagnostic = c.get("/api/v1/connectors/mercado-livre/diagnostics",
+                       headers=headers).json()
+    assert diagnostic["accounts"][0]["last_synced_at"] is not None
+
+
+def test_ml_diagnostics_requires_user_authentication(client):
+    c, _ = client
+    assert c.get("/api/v1/connectors/mercado-livre/diagnostics",
+                 headers=svc()).status_code == 401
