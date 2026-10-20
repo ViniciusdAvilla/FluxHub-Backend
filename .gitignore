@@ -5,3 +5,12 @@ __pycache__/
 .vscode/
 .env.*
 !.env.example
+
+# Production data and local databases must never be committed.
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
