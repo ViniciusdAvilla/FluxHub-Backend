@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 import httpx
+from app.config.settings import settings
 from app.core.auth import get_current_user
 from app.core.oauth_state import consume_state, issue_state
 from app.core.security import encrypt_token
@@ -53,7 +54,7 @@ async def callback(state: str = Query(min_length=16, max_length=200),
     try:
         data = await oauth_token({
             "grant_type": "authorization_code", "code": code,
-            "redirect_uri": __import__("app.config.settings", fromlist=["settings"]).settings.mercado_pago_redirect_uri})
+            "redirect_uri": settings.mercado_pago_redirect_uri})
         collector = str(data["user_id"])
         row = db.scalar(select(MercadoPagoConnectionModel).where(
             MercadoPagoConnectionModel.user_id == user_id,

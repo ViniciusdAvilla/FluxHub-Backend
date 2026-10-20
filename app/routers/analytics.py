@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
 from app.database.models import (
-    UserModel, CompanyDataSourceModel, ProductModel,
+    UserModel, CompanyDataSourceModel, ProductModel, MercadoLivreConnectionModel,
     MercadoLivreListingSnapshotModel as Listing,
     MercadoLivreOrderSnapshotModel as Order,
     MercadoLivreProductCostModel as Cost,
@@ -111,10 +111,8 @@ def import_ads_reports(body: AdsImport, user: UserModel = Depends(get_current_us
                        db: Session = Depends(get_db)):
     # This endpoint imports already-exported Ads data. It does NOT claim API sync.
     authorized = {r[0] for r in db.execute(
-        select(__import__("app.database.models", fromlist=["MercadoLivreConnectionModel"])
-               .MercadoLivreConnectionModel.mercado_livre_user_id)
-        .where(__import__("app.database.models", fromlist=["MercadoLivreConnectionModel"])
-               .MercadoLivreConnectionModel.user_id == user.id)).all()}
+        select(MercadoLivreConnectionModel.mercado_livre_user_id).where(
+            MercadoLivreConnectionModel.user_id == user.id)).all()}
     if any(row.account_id not in authorized for row in body.items):
         raise HTTPException(403, "Conta Mercado Livre não pertence ao usuário.")
     for row in body.items:

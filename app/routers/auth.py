@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from app.config.settings import settings
 from app.core.auth import get_current_user
 from app.core.security import create_access_token, verify_password
 from app.database.models import UserModel
@@ -22,7 +23,7 @@ def login(body: LoginInput, db: Session = Depends(get_db)):
     if not user or not user.is_active or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Credenciais inválidas.")
     return {"access_token": create_access_token(user.id), "token_type": "bearer",
-            "expires_in": 60 * 60}
+            "expires_in": settings.access_token_expire_minutes * 60}
 
 
 @router.get("/me")
