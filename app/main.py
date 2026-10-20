@@ -2,6 +2,8 @@ from fastapi import FastAPI
 
 from app.config.settings import settings
 from app.core.api_auth import protect_fastapi
+from app.routers.auth import router as auth_router
+from app.routers.admin import router as admin_router
 from app.routers.health import router as health_router
 from app.routers.products import router as products_router
 from app.routers.orders import router as orders_router
@@ -16,6 +18,9 @@ app = FastAPI(
     version=settings.app_version
 )
 
+
+app.include_router(auth_router, prefix=settings.api_prefix)
+app.include_router(admin_router, prefix=settings.api_prefix)
 
 app.include_router(
     health_router,

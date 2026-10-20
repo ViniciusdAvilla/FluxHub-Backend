@@ -32,6 +32,6 @@ def get_current_user(
         raise unauthorized from error
 
     user = db.get(UserModel, user_id)
-    if user is None:
+    if user is None or not user.is_active:
         raise unauthorized
     return user
