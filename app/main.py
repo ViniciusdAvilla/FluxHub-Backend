@@ -29,6 +29,8 @@ app.include_router(connectors_router, prefix=settings.api_prefix)
 app.include_router(mercado_livre_router, prefix=settings.api_prefix)
 app.include_router(mercado_pago_router, prefix=settings.api_prefix)
 app.include_router(analytics_router, prefix=settings.api_prefix)
+app.include_router(stock_router, prefix=settings.api_prefix)
+app.include_router(sales_router, prefix=settings.api_prefix)
 
 app.include_router(
     health_router,

@@ -65,3 +65,9 @@
   oficial alerta sobre descontinuação de multi-item em 25/10/2026.
 - Leitura de visitas GET /connectors/mercado-livre/visits?days=30 e
   /items/{item_id}/visits?days=30 consulta API real sob tenant autenticado.
+
+- Dashboard administrativo pode consumir GET /api/v1/admin/overview e
+  GET /api/v1/admin/users/{id}/overview (contagens e contas sem tokens).
+- Migração de legado adiciona company_id/source_key a products quando ausentes;
+  registros antigos continuam sem tenant e não são mostrados a clientes até
+  associação explícita segura ou nova importação.

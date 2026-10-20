@@ -56,10 +56,13 @@ def test_admin_user_lifecycle_and_isolation(client):
     c, Session = client
     assert c.get("/api/v1/admin/users").status_code == 401
     admin_headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    assert c.get("/api/v1/admin/overview", headers=admin_headers).json()["total_users"] == 1
     response = c.post("/api/v1/admin/users", headers=admin_headers, json={
         "email": "client1@example.com", "password": "ClientPassw0rd! "})
     assert response.status_code == 201, response.text
     user_id = response.json()["id"]
+    assert c.get(f"/api/v1/admin/users/{user_id}/overview",
+                 headers=admin_headers).json()["user"]["id"] == user_id
     client_headers = login(c, "client1@example.com", "ClientPassw0rd! ")
     assert c.get("/api/v1/admin/users", headers=client_headers).status_code == 403
     assert c.get("/api/v1/auth/me", headers=client_headers).json()["id"] == user_id
@@ -74,6 +77,10 @@ def test_admin_user_lifecycle_and_isolation(client):
             is_free_shipping=False, item_condition="new"))
         db.commit()
     assert len(c.get("/api/v1/products/", headers=client_headers).json()) == 1
+    assert c.get("/api/v1/stock/", headers=client_headers).json()["total_stock"] == 5
+    assert c.get("/api/v1/stock/", headers=admin_headers).json()["total_stock"] == 0
+    assert c.get("/api/v1/indicators/", headers=admin_headers).json()["total_products"] == 0
+    assert c.get("/api/v1/orders/", headers=client_headers).json() == []
     admin_products = c.get("/api/v1/products/", headers=admin_headers)
     assert admin_products.status_code == 200
     assert admin_products.json() == []
