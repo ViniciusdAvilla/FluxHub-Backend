@@ -1,12 +1,13 @@
 """Administrator-only JSON API for a future admin dashboard."""
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
 from app.core.security import hash_password
-from app.database.models import UserModel, CompanyDataSourceModel
+from app.database.models import (UserModel, CompanyDataSourceModel, ProductModel,
+    MercadoLivreConnectionModel, MercadoPagoConnectionModel)
 from app.database.session import get_db
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -102,3 +103,42 @@ def user_sources(user_id: int, _admin: UserModel = Depends(require_admin),
              "connected": s.connected, "enabled": s.enabled,
              "display_name": s.display_name, "last_synced_at": s.last_synced_at}
             for s in sources]
+
+
+@router.get("/overview")
+def admin_overview(_admin: UserModel = Depends(require_admin),
+                   db: Session = Depends(get_db)):
+    return {
+        "total_users": db.scalar(select(func.count(UserModel.id))),
+        "active_users": db.scalar(select(func.count(UserModel.id)).where(
+            UserModel.is_active.is_(True))),
+        "total_products": db.scalar(select(func.count(ProductModel.id))),
+        "mercado_livre_accounts": db.scalar(
+            select(func.count(MercadoLivreConnectionModel.id))),
+        "mercado_pago_accounts": db.scalar(
+            select(func.count(MercadoPagoConnectionModel.id))),
+    }
+
+
+@router.get("/users/{user_id}/overview")
+def client_overview(user_id: int, _admin: UserModel = Depends(require_admin),
+                    db: Session = Depends(get_db)):
+    user = db.get(UserModel, user_id)
+    if not user:
+        raise HTTPException(404, "Usuário não encontrado.")
+    return {
+        "user": show(user),
+        "total_products": db.scalar(select(func.count(ProductModel.id)).where(
+            ProductModel.company_id == user.id)),
+        "mercado_livre": [
+            {"account_id": c.mercado_livre_user_id, "nickname": c.nickname,
+             "expires_at": c.expires_at}
+            for c in db.scalars(select(MercadoLivreConnectionModel).where(
+                MercadoLivreConnectionModel.user_id == user.id)).all()
+        ],
+        "mercado_pago": [
+            {"account_id": c.mercado_pago_user_id, "expires_at": c.expires_at}
+            for c in db.scalars(select(MercadoPagoConnectionModel).where(
+                MercadoPagoConnectionModel.user_id == user.id)).all()
+        ],
+    }

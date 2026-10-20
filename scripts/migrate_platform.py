@@ -18,6 +18,13 @@ def main():
                 conn.execute(text("ALTER TABLE fluxhub_users ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE"))
             if "token_version" not in fields:
                 conn.execute(text("ALTER TABLE fluxhub_users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"))
+    if "products" in tables:
+        product_fields = {col["name"] for col in inspect(engine).get_columns("products")}
+        with engine.begin() as conn:
+            if "company_id" not in product_fields:
+                conn.execute(text("ALTER TABLE products ADD COLUMN company_id INTEGER"))
+            if "source_key" not in product_fields:
+                conn.execute(text("ALTER TABLE products ADD COLUMN source_key VARCHAR(150)"))
     Base.metadata.create_all(engine)
     print("Esquema atualizado (sem remover tabelas existentes).")
 
