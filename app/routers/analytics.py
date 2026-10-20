@@ -95,10 +95,12 @@ def import_costs(body: CostImport,
 
 
 @router.get("/product-costs")
-def list_costs(user: UserModel = Depends(get_current_user),
+def list_costs(limit: int = Query(default=500, ge=1, le=1000),
+               offset: int = Query(default=0, ge=0),
+               user: UserModel = Depends(get_current_user),
                db: Session = Depends(get_db)):
     rows = db.scalars(select(Cost).where(Cost.user_id == user.id)
-                      .order_by(Cost.external_id).limit(1000)).all()
+                      .order_by(Cost.external_id).offset(offset).limit(limit)).all()
     return [{"external_id": c.external_id, "unit_cost": c.unit_cost,
              "manufacturer": c.manufacturer,
              "marketplace_fee_percent": c.marketplace_fee_percent,

@@ -8,13 +8,13 @@ on:
       - "tests/test_api_auth.py"
       - ".github/workflows/platform-ci.yml"
   push:
-    branches: [platform-v2-auth-integrations]
+    branches: [main, migration/postgresql-sole-database-20261020]
 jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      ENVIRONMENT: development
+      ENVIRONMENT: test
       DATABASE_URL: sqlite:////tmp/fluxhub-platform-tests.db
       BACKEND_TOKEN: test_service_token_aaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       JWT_SECRET_KEY: test_jwt_secret_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
