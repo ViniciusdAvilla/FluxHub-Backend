@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     environment: str = "development"
     database_url: str = "sqlite:///middleware_ecommerce.db"
+<<<<<<< HEAD
     jwt_secret_key: SecretStr | None = None
     mercado_livre_client_id: SecretStr | None = None
     mercado_livre_client_secret: SecretStr | None = None
@@ -54,6 +55,10 @@ class Settings(BaseSettings):
         return self
 
     model_config = {"env_file": ".env", "extra": "ignore"}
+=======
+    # Compartilhado APENAS com o servidor Next.js; nunca exponha ao navegador.
+    backend_token: str = ""
+>>>>>>> 0f0be375cc57f2cc8768c8753476903afcddb5c7
 
 
 settings = Settings()

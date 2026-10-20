@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 from fastapi import FastAPI
 
 from app.config.settings import settings
@@ -52,3 +53,13 @@ app.include_router(
     dashboard_router,
     prefix=settings.api_prefix,
 )
+=======
+"""Compatibilidade com deployments que usam `uvicorn main:app`.
+
+A única instância da aplicação e seu middleware de segurança estão em app.main.
+"""
+
+from app.main import app
+
+__all__ = ["app"]
+>>>>>>> 0f0be375cc57f2cc8768c8753476903afcddb5c7

@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.config.settings import settings
+from app.core.api_auth import protect_fastapi
 from app.routers.health import router as health_router
 from app.routers.products import router as products_router
 from app.routers.orders import router as orders_router
@@ -48,6 +49,7 @@ app.include_router(
     prefix=settings.api_prefix,
 )
 
+<<<<<<< HEAD
 app.include_router(
     auth_router,
     prefix=settings.api_prefix,
@@ -62,3 +64,7 @@ app.include_router(
     analytics_router,
     prefix=settings.api_prefix,
 )
+=======
+# Protege todos os caminhos, inclusive /docs e /openapi.json.
+protect_fastapi(app)
+>>>>>>> 0f0be375cc57f2cc8768c8753476903afcddb5c7
