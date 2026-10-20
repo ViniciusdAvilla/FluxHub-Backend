@@ -102,7 +102,7 @@ def test_admin_user_lifecycle_and_isolation(client):
 def test_mercado_livre_state_bound_to_user_and_one_time(client, monkeypatch):
     c, Session = client
     admin_headers = login(c, "admin@example.com", "AdminPassw0rd!")
-    async def fake_exchange(code):
+    async def fake_exchange(code, state=None):
         return {"access_token": "FAKE", "refresh_token": "REFRESH",
                 "user_id": 34567, "expires_in": 3600}
     async def fake_profile(token):
@@ -124,6 +124,17 @@ def test_mercado_livre_state_bound_to_user_and_one_time(client, monkeypatch):
     assert status.status_code == 200
     assert len(status.json()) == 1
     assert "access_token" not in status.text
+    diag = c.get("/api/v1/connectors/mercado-livre/diagnostics", headers=admin_headers)
+    assert diag.status_code == 200
+    diagnostics = diag.json()
+    assert diagnostics["connection_count"] == 1
+    assert diagnostics["app_credentials_configured"] is True
+    assert diagnostics["accounts"][0]["seller_id"] == 34567
+    assert diagnostics["accounts"][0]["source_connected"] is True
+    assert diagnostics["accounts"][0]["source_enabled"] is True
+    assert "access_token" not in diag.text
+    assert "refresh_token" not in diag.text
+    assert "TEST_ONLY" not in diag.text
 
 
 def test_mercado_pago_callback_and_account_isolation(client, monkeypatch):
