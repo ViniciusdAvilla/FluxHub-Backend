@@ -125,3 +125,14 @@ def test_refuses_bad_redirect_before_issuing_oauth_link(monkeypatch):
     with pytest.raises(cli.SetupError, match="MERCADO_LIVRE_REDIRECT_URI"):
         cli.run(["--no-wait"])
     assert "/connectors/mercado-livre/authorize" not in called
+
+
+def test_setup_never_follows_http_redirect_with_service_secrets():
+    from urllib.request import Request
+    handler = cli._NoRedirect()
+    request = Request("http://127.0.0.1:8000/api/v1/auth/login",
+                      headers={"X-Backend-Token": "secret"})
+    assert handler.redirect_request(
+        request, None, 302, "redirect", {},
+        "https://external.example/steal"
+    ) is None
