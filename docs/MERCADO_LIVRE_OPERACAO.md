@@ -92,3 +92,50 @@ Após concluir a autorização, as credenciais do aplicativo permanecem no
 backend; o frontend apenas consome dados do FastAPI. Se seu Client Secret
 foi exposto em mensagens ou outros locais, substitua-o no painel e na VPS
 em uma janela controlada, verificando o impacto nos tokens já existentes.
+
+
+## Ativação inicial pela VPS — sem novo botão no frontend
+
+O frontend FluxHub passou a mostrar somente o vendedor já autorizado.
+Por isso, a autorização inicial deve ser feita pelo **próprio backend**.
+
+Na pasta do `FluxHub-Backend`, depois de atualizar a branch `main` e
+reiniciar o FastAPI, execute:
+
+```bash
+python3 scripts/activate_mercado_livre.py --check
+python3 scripts/activate_mercado_livre.py
+```
+
+O ativador usa **somente a biblioteca padrão do Python 3**, sem SQLAlchemy ou
+ambiente virtual para o cliente HTTP. O FastAPI continua rodando no ambiente
+Python original e usa PostgreSQL.
+
+- Lê o `BACKEND_TOKEN` do ambiente do terminal ou do arquivo `.env` privado
+  da raiz do repositório; se não houver, solicita a chave **sem exibi-la**.
+- Solicita e-mail/senha **da conta FluxHub**, também sem mostrar a senha,
+  porque a API exige autenticação de serviço + JWT de usuário.
+- Usa `/auth/me` para conferir o usuário e `/diagnostics` para verificar
+  aplicativo, callback exato e PKCE.
+- Obtém link oficial com `GET /connectors/mercado-livre/authorize` para o
+  usuário autenticado (o `state` único fica no PostgreSQL).
+- Mostra o link no terminal: abra no navegador em até 10 minutos, com a
+  **conta principal vendedora**, autorize uma vez e aguarde a mensagem
+  "Autorização registrada no PostgreSQL!". Não compartilhe esse link.
+- Se a VPS não tiver shell interativo por tempo suficiente, use
+  `python3 scripts/activate_mercado_livre.py --no-wait` e confira depois com
+  `--check`.
+
+É obrigatório que o callback Next.js
+`https://myfluxhub.tech/api/v1/connectors/mercado-livre/callback`
+esteja **publicado na VPS e encaminhando a autorização para o FastAPI**.
+O `git pull` somente do backend não instala automaticamente a versão
+atualizada do Next.js.
+
+Se `--check` apontar zero contas, ainda falta uma autorização válida.
+Client ID e Client Secret não substituem access_token/refresh_token do seller.
+Se `--check` mostrar conta conectada mas os dados não importarem, use o
+botão de sincronizar no frontend e procure nos logs privados por
+`[mercado-livre-data] resource=item_search upstream_status=...`,
+`resource=item_details`, ou `resource=orders`.
+Os logs não contêm token, dados confidenciais nem URL de OAuth.

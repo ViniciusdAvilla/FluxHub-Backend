@@ -37,8 +37,24 @@ def get_account(db: Session, user_id: int, account_id: int | None):
     return connections[0]
 
 
+def _resource_category(path: str) -> str:
+    """Nome fixo para observabilidade; nunca exponha IDs, query ou tokens."""
+    if path == "/users/me":
+        return "profile"
+    if path.startswith("/orders/"):
+        return "orders"
+    if path.startswith("/items/"):
+        return "item_details"
+    if path.endswith("/items/search"):
+        return "item_search"
+    if "visits" in path:
+        return "visits"
+    return "other"
+
+
 async def seller_request(db: Session, connection: MercadoLivreConnectionModel,
                          path: str, params: dict | None = None):
+    category = _resource_category(path)
     try:
         token = await get_valid_access_token(connection, db)
         async with httpx.AsyncClient(timeout=25) as client:
@@ -48,8 +64,21 @@ async def seller_request(db: Session, connection: MercadoLivreConnectionModel,
                 headers={"Authorization": f"Bearer {token}"})
             response.raise_for_status()
             return response.json()
-    except (httpx.HTTPError, MercadoLivreOAuthError, RuntimeError, ValueError):
-        raise HTTPException(502, "Não foi possível consultar o Mercado Livre.")
+    except httpx.HTTPStatusError as error:
+        # Status HTTP e categoria bastam para descobrir 401, 403 e 429.
+        # Nunca registramos URLs, cabeçalhos ou corpo da resposta.
+        logger.warning(
+            "[mercado-livre-data] resource=%s upstream_status=%s",
+            category, error.response.status_code,
+        )
+    except MercadoLivreOAuthError as error:
+        logger.warning(
+            "[mercado-livre-data] resource=%s oauth_phase=%s upstream_status=%s provider_error=%s",
+            category, error.phase, error.http_status or "unknown", error.provider_error,
+        )
+    except (httpx.RequestError, RuntimeError, ValueError, TypeError):
+        logger.warning("[mercado-livre-data] resource=%s upstream_status=unavailable", category)
+    raise HTTPException(502, "Não foi possível consultar o Mercado Livre.")
 
 
 @router.get("/authorize")
