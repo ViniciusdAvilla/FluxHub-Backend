@@ -113,3 +113,26 @@ async def test_non_pkce_app_uses_legacy_flow(ml_config, monkeypatch):
 async def test_pkce_requires_state(ml_config):
     with pytest.raises(auth.MercadoLivreOAuthError, match="state"):
         await auth.exchange_authorization_code("code")
+
+
+@pytest.mark.asyncio
+async def test_seller_api_403_is_logged_without_credentials(monkeypatch, caplog):
+    from fastapi import HTTPException
+    import app.routers.mercado_livre as ml
+
+    async def fake_token(connection, db):
+        return "secret-test-access-token"
+
+    monkeypatch.setattr(ml, "get_valid_access_token", fake_token)
+    original = httpx.AsyncClient
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(403, text="do-not-log-secret-response"))
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kwargs: original(transport=transport, **kwargs))
+    with pytest.raises(HTTPException) as caught:
+        await ml.seller_request(None, object(), "/orders/search", {"seller": 12345})
+    assert caught.value.status_code == 502
+    assert "resource=orders upstream_status=403" in caplog.text
+    assert "secret-test-access-token" not in caplog.text
+    assert "do-not-log-secret-response" not in caplog.text
+    assert "/orders/search" not in caplog.text
