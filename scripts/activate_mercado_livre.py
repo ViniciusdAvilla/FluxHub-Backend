@@ -13,7 +13,7 @@ import sys
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 PUBLIC_CALLBACK = "https://myfluxhub.tech/api/v1/connectors/mercado-livre/callback"
@@ -60,6 +60,12 @@ def validate_api_base(base):
     return base.rstrip("/").removesuffix("/api/v1") + "/api/v1"
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    """Não reenviar X-Backend-Token/JWT se a API tentar redirecionar."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def api_request(api_base, service_token, path, *, jwt=None, payload=None, timeout=20):
     if not path.startswith("/") or path.startswith("//") or "?" in path:
         raise SetupError("Caminho de consulta inválido.")
@@ -73,7 +79,7 @@ def api_request(api_base, service_token, path, *, jwt=None, payload=None, timeou
     request = Request(api_base + path, headers=headers, data=data,
                       method="POST" if payload is not None else "GET")
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             result = json.load(response)
     except HTTPError as error:
         # Não reproduzimos response body: pode incluir detalhes não sanitizados.
@@ -163,7 +169,7 @@ def run(argv=None):
     if not isinstance(jwt, str) or not jwt:
         raise SetupError("Login FluxHub não retornou token de sessão.")
     identity = api_request(api_base, key, "/auth/me", jwt=jwt)
-    if identity.get("email", "").lower() != email:
+    if not isinstance(identity, dict) or identity.get("email", "").lower() != email:
         raise SetupError("Sessão FluxHub incompatível com a conta informada.")
     print("\nUsuário FluxHub confirmado. ID:", identity.get("id"))
 
