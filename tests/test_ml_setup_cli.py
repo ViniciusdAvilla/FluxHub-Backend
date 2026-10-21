@@ -83,6 +83,8 @@ def test_check_mode_uses_fluxhub_session_only_and_no_oauth(monkeypatch, capsys):
             assert payload["email"] == "admin@example.com"
             return {"access_token": "fake-jwt"}
         if path == "/auth/me":
+            if jwt is None:
+                raise cli.ApiAuthError("user_jwt_required", "JWT humano obrigatório.")
             assert jwt == "fake-jwt"
             return {"id": 7, "email": "admin@example.com"}
         if path == "/connectors/mercado-livre/diagnostics":
@@ -111,6 +113,8 @@ def test_refuses_bad_redirect_before_issuing_oauth_link(monkeypatch):
         if path == "/auth/login":
             return {"access_token": "jwt"}
         if path == "/auth/me":
+            if jwt is None:
+                raise cli.ApiAuthError("user_jwt_required", "JWT humano obrigatório.")
             return {"email": "admin@example.com", "id": 2}
         if path == "/connectors/mercado-livre/diagnostics":
             return {
@@ -136,3 +140,60 @@ def test_setup_never_follows_http_redirect_with_service_secrets():
         request, None, 302, "redirect", {},
         "https://external.example/steal"
     ) is None
+
+
+def test_recognizes_service_vs_user_login_401_without_leaking_body():
+    import io
+    import json
+    from urllib.error import HTTPError
+    examples = (
+        ("Não autorizado.", "service_token", "BACKEND_TOKEN recusado"),
+        ("Credenciais inválidas.", "login", "neste PostgreSQL"),
+        ("A valid FluxHub login is required.", "user_jwt_required", "JWT"),
+    )
+    for detail, kind, expected in examples:
+        payload = json.dumps({"detail": detail, "sensitive": "NEVER_PRINT_ME"}).encode()
+        response = HTTPError("http://127.0.0.1", 401, "Unauthorized",
+                             {}, io.BytesIO(payload))
+        diagnostic = cli._known_auth_error(response)
+        assert isinstance(diagnostic, cli.ApiAuthError)
+        assert diagnostic.kind == kind
+        assert expected in str(diagnostic)
+        assert "NEVER_PRINT_ME" not in str(diagnostic)
+    unknown_response = HTTPError(
+        "http://127.0.0.1", 401, "Unauthorized", {},
+        io.BytesIO(b'{"detail":"a-secret-opaque-provider-error"}'))
+    diagnostic = cli._known_auth_error(unknown_response)
+    assert diagnostic.kind == "unknown_401"
+    assert "a-secret-opaque-provider-error" not in str(diagnostic)
+
+
+def test_wrong_service_token_rejected_before_asking_for_password(monkeypatch):
+    monkeypatch.setattr(cli, "service_key", lambda: "wrong-token-" + "x" * 40)
+    inputs = []
+    def should_not_prompt(prompt):
+        inputs.append(prompt)
+        raise AssertionError("Não peça login FluxHub com token de serviço inválido")
+    monkeypatch.setattr("builtins.input", should_not_prompt)
+    monkeypatch.setattr(cli.getpass, "getpass", should_not_prompt)
+    def fake_api(base, key, path, *, jwt=None, payload=None, timeout=20):
+        assert path == "/auth/me"
+        assert jwt is None
+        raise cli.ApiAuthError("service_token", "BACKEND_TOKEN recusado pelo FastAPI.")
+    monkeypatch.setattr(cli, "api_request", fake_api)
+    with pytest.raises(cli.ApiAuthError, match="BACKEND_TOKEN recusado"):
+        cli.run(["--check"])
+    assert inputs == []
+
+
+def test_valid_service_token_preflight_requires_human_jwt(monkeypatch, capsys):
+    calls = []
+    def fake_api(base, key, path, *, jwt=None, payload=None, timeout=20):
+        calls.append((path, jwt))
+        if path == "/auth/me" and jwt is None:
+            raise cli.ApiAuthError("user_jwt_required", "JWT humano obrigatório.")
+        raise AssertionError("não era esperado tentar outro login")
+    monkeypatch.setattr(cli, "api_request", fake_api)
+    cli.assert_service_token("http://127.0.0.1:8000/api/v1", "s" * 48)
+    assert "BACKEND_TOKEN aceito" in capsys.readouterr().out
+    assert calls == [("/auth/me", None)]

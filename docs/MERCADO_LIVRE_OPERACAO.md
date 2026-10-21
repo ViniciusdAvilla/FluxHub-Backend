@@ -139,3 +139,38 @@ botão de sincronizar no frontend e procure nos logs privados por
 `[mercado-livre-data] resource=item_search upstream_status=...`,
 `resource=item_details`, ou `resource=orders`.
 Os logs não contêm token, dados confidenciais nem URL de OAuth.
+
+
+## Quando o ativador retorna HTTP 401
+
+Na versão atual, antes de perguntar e-mail/senha, o script valida o
+`X-Backend-Token` contra o **processo FastAPI ativo** chamando
+`GET /api/v1/auth/me` sem JWT humano. A API deve responder
+`A valid FluxHub login is required.`, o que comprova que a chave
+de serviço foi aceita (o 401 sem JWT humano é intencional).
+
+- **`BACKEND_TOKEN recusado pelo FastAPI`**: a chave lida pelo ativador
+  de seu `BACKEND_TOKEN` do shell ou do `.env` local **não coincide** com
+  a configuração real do processo FastAPI. Verifique se o systemd utiliza
+  outro `EnvironmentFile`, se Docker fornece a variável separadamente,
+  e se o servidor foi reiniciado depois de editar o ambiente. **Não**
+  publique token em terminal compartilhado nem aqui.
+- **`FastAPI recebeu a requisição, mas recusou o login FluxHub neste PostgreSQL`**:
+  o serviço aceitou o BACKEND_TOKEN, mas `POST /auth/login` não
+  encontrou usuário ativo com e-mail/senha válida **nesse banco**.
+  Verifique a instalação efetivamente usada pelo painel, o banco alvo do
+  FastAPI e a existência da conta sem exibir `password_hash`.
+- **`BACKEND_TOKEN aceito pelo FastAPI`**: pode prosseguir com o e-mail e
+  senha do painel. O script não imprime senha, JWT ou token de serviço.
+
+Para identificar o serviço sem mostrar segredos:
+
+```bash
+systemctl list-units --type=service | grep -Ei 'fluxhub|fastapi|uvicorn'
+```
+
+A inspeção de `EnvironmentFile`, Docker, `/proc/*/environ` ou
+`systemctl show` pode conter segredos. Não copie a saída bruta desses
+comandos para chats ou GitHub. Se alterar `BACKEND_TOKEN`, ele deverá
+continuar **idêntico** no FastAPI e Next.js; preferencialmente alinhe
+o script à configuração existente, sem girar outras chaves.

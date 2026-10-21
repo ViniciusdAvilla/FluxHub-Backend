@@ -25,6 +25,70 @@ class SetupError(Exception):
     pass
 
 
+class ApiAuthError(SetupError):
+    """Tipo conhecido de erro da API, nunca inclui corpo bruto nem credenciais."""
+    def __init__(self, kind, message):
+        super().__init__(message)
+        self.kind = kind
+
+
+def _known_auth_error(http_error):
+    # Whitelist restrita: respostas desconhecidas nunca são mostradas na tela.
+    try:
+        raw = http_error.read(2049)
+        data = json.loads(raw) if len(raw) <= 2048 else None
+        detail = data.get("detail") if isinstance(data, dict) else None
+    except (ValueError, OSError, UnicodeError, TypeError):
+        detail = None
+    if http_error.code == 401:
+        if detail == "Não autorizado.":
+            return ApiAuthError(
+                "service_token",
+                "BACKEND_TOKEN recusado pelo FastAPI. A chave do script não coincide "
+                "com a configuração carregada pelo serviço (verifique EnvironmentFile/systemd, "
+                "Docker ou .env; não envie o valor da chave).",
+            )
+        if detail == "Credenciais inválidas.":
+            return ApiAuthError(
+                "login",
+                "O FastAPI recebeu a requisição, mas recusou o login FluxHub neste "
+                "PostgreSQL. Confira se a conta existe/está ativa no banco usado "
+                "pelo FastAPI e se o painel está apontando para esta instância.",
+            )
+        if detail == "A valid FluxHub login is required.":
+            return ApiAuthError(
+                "user_jwt_required",
+                "BACKEND_TOKEN aceito; esta rota exige também o login FluxHub (JWT).",
+            )
+        return ApiAuthError(
+            "unknown_401",
+            "HTTP 401 não identificado. Verifique o backend em execução "
+            "e a rota; não exponha os cabeçalhos de autenticação.",
+        )
+    if http_error.code == 503 and detail == "Autenticação do backend não configurada.":
+        return SetupError(
+            "FastAPI não possui BACKEND_TOKEN válido carregado em execução. "
+            "Configure a chave privada do serviço e reinicie o FastAPI."
+        )
+    return None
+
+
+def assert_service_token(api_base, token):
+    """Distingue chave de serviço rejeitada do login humano antes de pedir senha."""
+    try:
+        # Sem Authorization: usuário, /auth/me DEVE pedir JWT caso X-Backend-Token seja válido.
+        api_request(api_base, token, "/auth/me")
+    except ApiAuthError as error:
+        if error.kind == "user_jwt_required":
+            print("BACKEND_TOKEN aceito pelo FastAPI.")
+            return
+        raise
+    raise SetupError(
+        "Diagnóstico inesperado: /auth/me respondeu sem exigir JWT. "
+        "Confirme se o serviço na porta configurada é o FastAPI do FluxHub."
+    )
+
+
 def service_key(environ=None, dotenv_path=None):
     """Lê apenas BACKEND_TOKEN. Não executa nem importa as outras variáveis."""
     environ = os.environ if environ is None else environ
@@ -82,9 +146,11 @@ def api_request(api_base, service_token, path, *, jwt=None, payload=None, timeou
         with build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             result = json.load(response)
     except HTTPError as error:
-        # Não reproduzimos response body: pode incluir detalhes não sanitizados.
-        hints = {401: "BACKEND_TOKEN ou login FluxHub inválido.",
-                 403: "Usuário sem permissão.",
+        auth_error = _known_auth_error(error)
+        if auth_error is not None:
+            raise auth_error from None
+        # Nunca exponha o corpo bruto de erro nem credenciais no terminal.
+        hints = {403: "Usuário sem permissão.",
                  404: "Rota não encontrada. Atualize e reinicie o FastAPI.",
                  422: "Parâmetros rejeitados.",
                  503: "Configuração incompleta no FastAPI."}
@@ -157,6 +223,9 @@ def run(argv=None):
         key = getpass.getpass("BACKEND_TOKEN do serviço (entrada oculta): ")
     if len(key) < 32 or len(key) > 2048 or key != key.strip():
         raise SetupError("BACKEND_TOKEN ausente ou inválido. Confira o .env do backend.")
+
+    print("Verificando BACKEND_TOKEN na API ativa (sem exibir o segredo)...")
+    assert_service_token(api_base, key)
 
     email = input("E-mail da conta FluxHub usada no painel: ").strip().lower()
     if not email or "@" not in email:
