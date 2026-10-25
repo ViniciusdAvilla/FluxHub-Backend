@@ -285,9 +285,16 @@ async def suggest(body: SuggestRequest,
     key = settings.openai_api_key.get_secret_value() if settings.openai_api_key else ""
     if not key:
         raise HTTPException(503, "Sugestões por IA ainda não configuradas.")
+    # Redact common personal identifiers before the optional third-party AI call.
+    # Context remains tenant-scoped and is sent only after clicking "Sugerir".
+    def minimize(value: str) -> str:
+        value = re.sub(r"[\\w.+-]+@[\\w.-]+\\.[A-Za-z]{2,}", "[e-mail oculto]", value)
+        value = re.sub(r"\\b\\+?\\d[\\d\\s().-]{8,}\\d\\b", "[número oculto]", value)
+        return value
+
     recent = current["messages"][-6:]
     context = "\n".join(
-        ("Vendedor: " if m["from_seller"] else "Comprador: ") + m["text"][:800]
+        ("Vendedor: " if m["from_seller"] else "Comprador: ") + minimize(m["text"][:800])
         for m in recent)
     instruction = (
         "Você prepara RASCUNHOS para revisão humana, nunca envia mensagens. "
