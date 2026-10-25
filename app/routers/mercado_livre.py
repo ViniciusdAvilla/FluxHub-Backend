@@ -9,6 +9,7 @@ from app.core.auth import get_current_user
 from app.core.oauth_state import consume_state, issue_state
 from app.core.security import encrypt_token
 from app.config.settings import settings
+from app.connectors.mercado_livre.identity import normalized_seller_identity
 from app.database.session import get_db
 from app.database.models import (
     UserModel, MercadoLivreConnectionModel, MercadoLivreOAuthStateModel,
@@ -196,6 +197,51 @@ def diagnostics(user: UserModel = Depends(get_current_user),
             for a in accounts
         ],
     }
+
+
+@router.get("/identity")
+async def seller_identity(
+    account_id: int | None = Query(default=None, ge=1),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Read the seller's public-facing display name and photo for their FluxHub tenant.
+
+    OAuth tokens never leave the backend; image links are restricted to ML CDN.
+    No schema change: this also works for sellers linked before the feature.
+    """
+    if account_id is None:
+        account = db.scalar(
+            select(MercadoLivreConnectionModel)
+            .where(MercadoLivreConnectionModel.user_id == user.id)
+            .order_by(MercadoLivreConnectionModel.id)
+            .limit(1)
+        )
+        if account is None:
+            raise HTTPException(404, "Nenhuma conta Mercado Livre vinculada.")
+    else:
+        account = get_account(db, user.id, account_id)
+    profile_data = await seller_request(db, account, "/users/me")
+    if not isinstance(profile_data, dict) or (
+        int(profile_data.get("id") or 0) != account.mercado_livre_user_id
+    ):
+        raise HTTPException(502, "O perfil recebido não corresponde à conta vinculada.")
+    identity = normalized_seller_identity(profile_data, account.mercado_livre_user_id)
+    if identity["picture_url"] is None:
+        # Public seller info can contain 'logo' even when /users/me omits it.
+        # A photo is optional: unavailable logo must never break OAuth/login.
+        try:
+            public_data = await seller_request(
+                db, account, f"/users/{account.mercado_livre_user_id}"
+            )
+            if isinstance(public_data, dict) and int(public_data.get("id") or 0) == account.mercado_livre_user_id:
+                public_identity = normalized_seller_identity(
+                    public_data, account.mercado_livre_user_id
+                )
+                identity["picture_url"] = public_identity["picture_url"]
+        except HTTPException:
+            pass
+    return identity
 
 
 @router.get("/profile")
