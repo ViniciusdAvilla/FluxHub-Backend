@@ -148,3 +148,54 @@ async def test_ai_not_configured_does_not_send_or_invent(monkeypatch,account):
         await support.suggest(body=support.SuggestRequest(account_id=123,kind="messages",reference="77"),
                               user=account.user,db=object())
     assert error.value.status_code==503
+
+
+@pytest.mark.asyncio
+async def test_post_sale_2026_agents_use_official_mlb_recipient(monkeypatch, account):
+    class DB:
+        def add(self,item): item.id=15
+        def commit(self): pass
+    async def fake_detail(token,kind,reference,seller_id):
+        return {"can_reply":True,"conversation_path":"/packs/77/sellers/123/conversations/post_sale"}
+    sent=[]
+    async def fake_call(token,method,path,params=None,payload=None):
+        if path == "/users/me":
+            return {"id":123,"site_id":"MLB"}
+        sent.append((method,path,params,payload))
+        return {"id":"sent"}
+    monkeypatch.setattr(support,"_detail",fake_detail)
+    monkeypatch.setattr(support,"_call",fake_call)
+    body=support.ReplyRequest(account_id=123,kind="messages",reference="77",
+                              text="O pedido está em trânsito.",confirmed=True)
+    result=await support.reply(body=body,user=account.user,db=DB())
+    assert result["sent"] is True
+    assert sent[0][1]=="/messages/packs/77/sellers/123"
+    assert sent[0][3]["to"]["user_id"]==3037675074
+    assert sent[0][2]=={"tag":"post_sale"}
+
+
+@pytest.mark.asyncio
+async def test_ai_suggestions_are_only_drafts_and_no_external_tokens_exposed(monkeypatch, account):
+    from pydantic import SecretStr
+    from app.config.settings import settings
+    monkeypatch.setattr(settings,"openai_api_key",SecretStr("fake-key"))
+    async def fake_detail(token,kind,reference,seller_id):
+        return {"can_reply":True,"reference":reference,
+                "messages":[{"from_seller":False,"text":"Tem nota fiscal?"}]}
+    monkeypatch.setattr(support,"_detail",fake_detail)
+    original=httpx.AsyncClient
+    def respond(req):
+        assert req.url.host=="api.openai.com"
+        assert req.headers["Authorization"]=="Bearer fake-key"
+        import json
+        body=json.loads(req.content)
+        assert body["store"] is False
+        assert "Tem nota fiscal?" in body["input"]
+        return httpx.Response(200,json={"output":[{"content":[
+          {"type":"output_text","text":"Olá! Consulte os documentos do seu pedido."}]}]})
+    monkeypatch.setattr(httpx,"AsyncClient",lambda **kwargs:original(transport=httpx.MockTransport(respond),**kwargs))
+    result=await support.suggest(body=support.SuggestRequest(account_id=123,kind="questions",reference="66"),
+                                 user=account.user,db=object())
+    assert result["requires_approval"] is True
+    assert "Olá!" in result["suggestion"]
+    assert "fake-key" not in str(result)
