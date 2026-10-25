@@ -240,3 +240,62 @@ def test_ml_diagnostics_requires_user_authentication(client):
     c, _ = client
     assert c.get("/api/v1/connectors/mercado-livre/diagnostics",
                  headers=svc()).status_code == 401
+
+
+def test_saas_marketplace_catalog_and_multi_tenant_oauth(client, monkeypatch):
+    """Dois clientes SaaS com duas lojas distintas sem cruzar dados ou revelar tokens."""
+    c, Session = client
+    admin_headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    created = c.post("/api/v1/admin/users", headers=admin_headers, json={
+        "email": "seller2@example.com", "password": "Seller2Passw0rd!",
+    })
+    assert created.status_code == 201, created.text
+    seller2_headers = login(c, "seller2@example.com", "Seller2Passw0rd!")
+    assert c.get("/api/v1/connectors/catalog").status_code == 401
+    providers = c.get("/api/v1/connectors/catalog", headers=admin_headers)
+    assert providers.status_code == 200
+    listing = {p["id"]: p for p in providers.json()}
+    assert listing["mercado_livre"]["status"] == "available"
+    assert listing["mercado_livre"]["allows_multiple_accounts"] is True
+    assert listing["mercado_pago"]["status"] == "planned"
+    assert listing["shopee"]["status"] == "planned"
+    assert listing["tiktok_shop"]["status"] == "planned"
+    assert c.post("/api/v1/connectors/mercado-livre/authorize").status_code == 401
+
+    async def exchange(code, state=None):
+        account_id = 23456 if code == "second" else 12345
+        return {"access_token": "FAKE", "refresh_token": "REFRESH",
+                "user_id": account_id, "expires_in": 3600}
+
+    async def profile(token):
+        # Callback order below determines which seller the mocked profile represents.
+        return {"id": seller_id[0], "nickname": f"Loja {seller_id[0]}"}
+
+    seller_id = [12345]
+    monkeypatch.setattr("app.routers.mercado_livre.exchange_authorization_code", exchange)
+    monkeypatch.setattr("app.routers.mercado_livre.fetch_profile", profile)
+    from urllib.parse import parse_qs, urlsplit
+
+    for headers, code, sid in (
+        (admin_headers, "first", 12345),
+        (seller2_headers, "second", 23456),
+    ):
+        seller_id[0] = sid
+        authorization = c.post("/api/v1/connectors/mercado-livre/authorize", headers=headers)
+        assert authorization.status_code == 200, authorization.text
+        state = parse_qs(urlsplit(
+            authorization.json()["authorization_url"]).query)["state"][0]
+        linked = c.get("/api/v1/connectors/mercado-livre/callback",
+                       params={"state": state, "code": code})
+        assert linked.status_code == 200, linked.text
+        assert linked.json()["account_id"] == sid
+
+    admin_accounts = c.get("/api/v1/connectors/mercado-livre", headers=admin_headers)
+    other_accounts = c.get("/api/v1/connectors/mercado-livre", headers=seller2_headers)
+    assert [a["account_id"] for a in admin_accounts.json()] == [12345]
+    assert [a["account_id"] for a in other_accounts.json()] == [23456]
+    assert "refresh_token" not in admin_accounts.text
+    assert c.get("/api/v1/connectors/mercado-livre/profile",
+                 headers=admin_headers, params={"account_id": 23456}).status_code == 404
+    assert c.delete("/api/v1/connectors/mercado-livre",
+                    headers=seller2_headers, params={"account_id": 12345}).status_code == 404
