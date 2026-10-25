@@ -325,3 +325,18 @@ class MercadoLivreVisitDailySnapshotModel(Base):
     total_visits: Mapped[int] = mapped_column(Integer, default=0)
     captured_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class SupportReplyAuditModel(Base):
+    """Log of seller-approved replies. AI drafts and credentials are not stored."""
+    __tablename__ = "support_reply_audits"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("fluxhub_users.id", ondelete="CASCADE"), index=True)
+    seller_id: Mapped[int] = mapped_column(Integer, index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    reference: Mapped[str] = mapped_column(String(40), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    provider_message_id: Mapped[str] = mapped_column(String(100), default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
