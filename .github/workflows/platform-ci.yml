@@ -7,7 +7,7 @@ on:
       - "tests/test_platform.py"
       - "tests/test_ml_oauth.py"
       - "tests/test_ml_seller_identity.py"
-      - "tests/test_ml_setup_cli.py"
+      - "tests/test_ml_setup_cli.py"\n      - "tests/test_support.py"
       - "tests/test_api_auth.py"
       - ".github/workflows/platform-ci.yml"
   push:
@@ -42,4 +42,4 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install -r requirements.txt
       - run: python -m compileall -q app scripts
-      - run: python -m pytest -q tests/test_api_auth.py tests/test_platform.py tests/test_postgresql_runtime.py tests/test_ml_oauth.py tests/test_ml_seller_identity.py tests/test_ml_setup_cli.py
+      - run: python -m pytest -q tests/test_api_auth.py tests/test_platform.py tests/test_postgresql_runtime.py tests/test_ml_oauth.py tests/test_ml_seller_identity.py tests/test_ml_setup_cli.py tests/test_support.py
