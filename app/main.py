@@ -9,6 +9,7 @@ from app.routers.mercado_livre import router as mercado_livre_router
 from app.routers.mercado_pago import router as mercado_pago_router
 from app.routers.support import router as support_router
 from app.routers.analytics import router as analytics_router
+from app.routers.product_performance import router as product_performance_router
 from app.routers.atendimento import router as atendimento_router
 from app.routers.health import router as health_router
 from app.routers.products import router as products_router
@@ -32,6 +33,7 @@ app.include_router(mercado_livre_router, prefix=settings.api_prefix)
 app.include_router(mercado_pago_router, prefix=settings.api_prefix)
 app.include_router(support_router, prefix=settings.api_prefix)
 app.include_router(analytics_router, prefix=settings.api_prefix)
+app.include_router(product_performance_router, prefix=settings.api_prefix)
 app.include_router(atendimento_router, prefix=settings.api_prefix)
 app.include_router(stock_router, prefix=settings.api_prefix)
 app.include_router(sales_router, prefix=settings.api_prefix)
