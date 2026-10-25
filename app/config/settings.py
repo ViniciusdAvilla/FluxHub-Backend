@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     mercado_livre_redirect_uri: str = (
         "https://myfluxhub.tech/api/v1/connectors/mercado-livre/callback"
     )
-    mercado_pago_client_id: SecretStr | None = None
+    # Optional: manual support works without this key.\n    openai_api_key: SecretStr | None = None\n    openai_model: str = "gpt-4.1-mini"\n    mercado_pago_client_id: SecretStr | None = None
     mercado_pago_client_secret: SecretStr | None = None
     mercado_pago_redirect_uri: str = "https://myfluxhub.tech/backend-api/api/v1/connectors/mercado-pago/callback"
     frontend_url: str = "http://localhost:3000"
