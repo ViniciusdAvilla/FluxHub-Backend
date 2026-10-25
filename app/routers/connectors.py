@@ -6,12 +6,19 @@ from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
 from app.database.models import UserModel, CompanyDataSourceModel
 from app.database.session import get_db
+from app.connectors.catalog import provider_catalog
 
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
 
 
 class SourceUpdate(BaseModel):
     enabled: bool
+
+
+@router.get("/catalog")
+def catalog():
+    """Capacidades disponíveis; não expõe tokens nem confunde planned e available."""
+    return provider_catalog()
 
 
 @router.get("")

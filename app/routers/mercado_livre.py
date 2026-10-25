@@ -81,6 +81,9 @@ async def seller_request(db: Session, connection: MercadoLivreConnectionModel,
     raise HTTPException(502, "Não foi possível consultar o Mercado Livre.")
 
 
+# POST é usado pela UI SaaS com proteção CSRF no Next.js.
+# GET permanece para o ativador CLI já publicado.
+@router.post("/authorize")
 @router.get("/authorize")
 def authorize(user: UserModel = Depends(get_current_user),
               db: Session = Depends(get_db)):
