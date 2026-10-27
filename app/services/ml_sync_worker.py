@@ -10,9 +10,12 @@ import random
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
-from app.database.models import (CompanyDataSourceModel, MercadoLivreSyncJobModel as Job, UserModel)
+from app.database.models import (
+    CompanyDataSourceModel, MercadoLivreListingSnapshotModel as Listing,
+    MercadoLivreOrderSnapshotModel as Order, MercadoLivreSyncJobModel as Job, UserModel,
+)
 from app.database.session import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -20,7 +23,7 @@ LEASE_SECONDS = 600
 # /orders/search is time-sliced so large stores do not rely on a deep offset.
 ORDERS_WINDOW_SECONDS = 30 * 24 * 60 * 60
 ORDERS_MAX_PAGE_WINDOW = 9000
-MAX_RETRIES = 15
+MAX_RETRIES = 5
 SCROLL_MAX_AGE = timedelta(minutes=4)
 
 
@@ -42,25 +45,20 @@ def _claim_job() -> int | None:
         if job is None:
             return None
 
-        # A worker died mid-page: rescan rather than replay a stateful cursor,
-        # which might already have advanced. Upserts make replay safe.
-        if job.status == "running":
-            if job.phase == "listings":
-                job.scroll_id = None
-                job.scroll_updated_at = None
-                job.listings_scanned = 0
-                job.listings_saved = 0
-            elif job.phase == "orders":
-                job.orders_offset = 0
-                job.orders_saved = 0
-        if job.phase == "listings" and job.scroll_id and (
+        # A staged scan page is safe to replay after crashes, HTTP 502 or 429.
+        # If no page was staged when the lease expired, start a fresh scan but
+        # keep the true number of persisted listings; never lose DB progress.
+        if job.status == "running" and job.phase == "listings" and job.pending_listing_ids is None:
+            job.scroll_id = None
+            job.scroll_updated_at = None
+        if job.status == "running" and job.phase == "orders":
+            job.orders_offset = 0
+        if job.phase == "listings" and job.pending_listing_ids is None and job.scroll_id and (
             job.scroll_updated_at is None
             or now - job.scroll_updated_at > SCROLL_MAX_AGE
         ):
             job.scroll_id = None
             job.scroll_updated_at = None
-            job.listings_scanned = 0
-            job.listings_saved = 0
 
         job.status = "running"
         job.lease_until = now + timedelta(seconds=LEASE_SECONDS)
@@ -100,9 +98,53 @@ async def process_one_sync_batch() -> bool:
                     horizon)
                 job.orders_offset = 0
                 db.commit()
-            # Reuse the same validated, tenant-scoped upsert batch as manual sync.
-            from app.routers.analytics import sync
-            result = await sync(
+            from app.routers import analytics as analytics_router
+            prefetched_page = None
+            if job.phase == "listings":
+                if job.pending_listing_ids is None:
+                    from app.routers.mercado_livre import get_account
+                    account = get_account(db, user.id, job.mercado_livre_user_id)
+                    params = {"search_type": "scan"}
+                    if job.scroll_id:
+                        params["scroll_id"] = job.scroll_id
+                    try:
+                        page = await analytics_router.seller_request(
+                            db, account, f"/users/{job.mercado_livre_user_id}/items/search", params)
+                    except HTTPException as exc:
+                        if exc.status_code == 429:
+                            raise HTTPException(429, exc.detail, headers={
+                                **(exc.headers or {}), "X-FluxHub-Safe-Retry": "true"
+                            }) from exc
+                        raise
+                    if not isinstance(page, dict):
+                        raise HTTPException(502, "Página de anúncios inválida.")
+                    ids = page.get("results")
+                    cursor = page.get("scroll_id")
+                    if not isinstance(ids, list) or len(ids) > 100 or any(
+                        not isinstance(item, str) or not item.isalnum() for item in ids
+                    ):
+                        raise HTTPException(502, "IDs de anúncios inválidos.")
+                    if cursor is not None and (
+                        not isinstance(cursor, str) or not 1 <= len(cursor) <= 4096
+                    ):
+                        raise HTTPException(502, "Cursor de anúncios inválido.")
+                    # Durable checkpoint BEFORE /items/bulk. Retry the exact
+                    # same IDs when detail hydration fails.
+                    job.pending_listing_ids = ids
+                    job.pending_next_scroll_id = cursor if ids else None
+                    job.scroll_updated_at = utcnow() if cursor else None
+                    paging = page.get("paging")
+                    if isinstance(paging, dict) and isinstance(paging.get("total"), int):
+                        job.listings_total = paging["total"]
+                    db.commit()
+                prefetched_page = {
+                    "results": job.pending_listing_ids,
+                    "scroll_id": job.pending_next_scroll_id,
+                    "paging": {"total": job.listings_total},
+                }
+            # Reuse the validated tenant-scoped upsert routine, bypassing a
+            # second scan call when the worker has a staged page.
+            result = await analytics_router._sync_batch(
                 account_id=job.mercado_livre_user_id,
                 offset=job.orders_offset if job.phase == "orders" else 0,
                 limit=20,
@@ -112,13 +154,15 @@ async def process_one_sync_batch() -> bool:
                 db=db,
                 orders_created_from=job.orders_window_start if job.phase == "orders" else None,
                 orders_created_to=job.orders_window_end if job.phase == "orders" else None,
+                prefetched_page=prefetched_page,
             )
             if result.get("orders_unavailable"):
                 raise HTTPException(502, "Consulta de pedidos indisponível.")
-            # sync() commits the item batch before the job checkpoint. If the
-            # process dies in between, the expired lease restarts that phase
-            # from the beginning and safe upserts replay the records.
+            # _sync_batch commits the data separately. Refresh the row to
+            # respect any pause requested while the HTTP call was in flight.
             job = db.get(Job, job_id)
+            db.refresh(job)
+            was_paused = job.status == "paused"
             order_total = result.get("orders_page_total")
             next_order_offset = result.get("next_orders_offset")
             near_deep_offset = (
@@ -138,26 +182,37 @@ async def process_one_sync_batch() -> bool:
                     job.orders_window_start + timedelta(seconds=job.orders_span_seconds),
                     job.orders_until)
                 job.orders_offset = 0
-                job.status = "queued"
+                job.status = "paused" if was_paused else "queued"
                 job.lease_until = None
                 job.updated_at = utcnow()
                 db.commit()
                 return True
             if job.phase == "listings" and isinstance(result.get("listings_total"), int):
                 job.listings_total = result["listings_total"]
-            job.listings_scanned += int(result.get("listings", 0))
-            job.listings_saved += int(result.get("saved_listings", 0))
-            job.orders_saved += int(result.get("orders", 0))
+            # Progress is the unique persisted total, not the sum of repeated
+            # attempts. Existing 11,517 items stay visible through retries.
+            if job.phase == "listings":
+                unique = db.scalar(select(func.count(Listing.id)).where(
+                    Listing.user_id == job.user_id,
+                    Listing.mercado_livre_user_id == job.mercado_livre_user_id)) or 0
+                job.listings_scanned = unique
+                job.listings_saved = unique
+            else:
+                job.orders_saved = db.scalar(select(func.count(Order.id)).where(
+                    Order.user_id == job.user_id,
+                    Order.mercado_livre_user_id == job.mercado_livre_user_id)) or 0
             job.pages_done += 1
             job.retry_count = 0
-            job.status = "queued"
+            job.status = "paused" if was_paused else "queued"
             job.last_error = None
             job.retry_at = None
             job.lease_until = None
             job.updated_at = utcnow()
             if job.phase == "listings":
                 job.scroll_id = result.get("next_scroll_id")
-                job.scroll_updated_at = utcnow() if job.scroll_id else None
+                job.scroll_updated_at = (job.scroll_updated_at or utcnow()) if job.scroll_id else None
+                job.pending_listing_ids = None
+                job.pending_next_scroll_id = None
                 if not job.scroll_id:
                     job.phase = "orders"
                     job.orders_offset = 0
@@ -193,16 +248,29 @@ async def process_one_sync_batch() -> bool:
             job = db.get(Job, job_id)
             if not job:
                 return True
+            db.refresh(job)
+            if job.status == "paused":
+                job.lease_until = None
+                job.retry_at = None
+                db.commit()
+                return True
             status = exc.status_code if isinstance(exc, HTTPException) else 502
             job.retry_count += 1
             job.lease_until = None
             job.updated_at = utcnow()
             # Never persist upstream bodies, tokens, URLs or cursor values in logs.
-            logger.warning("ml_sync_batch_failed job_id=%s phase=%s http_status=%s attempts=%s",
-                           job_id, job.phase, status, job.retry_count)
-            if status in (401, 403, 404, 422) or (status != 429 and job.retry_count >= MAX_RETRIES):
+            logger.warning(
+                "ml_sync_batch_failed job_id=%s phase=%s http_status=%s attempts=%s error_type=%s staged_ids=%s",
+                job_id, job.phase, status, job.retry_count,
+                type(exc).__name__, len(job.pending_listing_ids or []),
+            )
+            if status in (401, 403, 404, 422):
                 job.status = "failed"
-                job.last_error = "Sincronização interrompida; confira a conexão e tente novamente."
+                job.last_error = "Conexão ou dados inválidos; confira a conta Mercado Livre."
+            elif status != 429 and job.retry_count >= MAX_RETRIES:
+                job.status = "paused"
+                job.last_error = ("Sincronização pausada após falhas repetidas; "
+                                  "os anúncios já salvos foram preservados.")
             else:
                 job.status = "retry"
                 delay = min(300, 2 ** min(job.retry_count, 8)) + random.uniform(0, 1)
@@ -215,17 +283,8 @@ async def process_one_sync_batch() -> bool:
                     "Limite temporário de requisições (429); retomada automática."
                     if status == 429 else "Falha temporária na API; nova tentativa agendada."
                 )
-                # Only a 429 from the scan request itself proves no page was
-                # consumed. A bulk-details 429 may occur after advancing it.
-                safe_scroll_retry = (
-                    status == 429 and isinstance(exc, HTTPException)
-                    and (exc.headers or {}).get("X-FluxHub-Safe-Retry") == "true"
-                )
-                if job.phase == "listings" and not safe_scroll_retry:
-                    job.scroll_id = None
-                    job.scroll_updated_at = None
-                    job.listings_scanned = 0
-                    job.listings_saved = 0
+                # A staged page remains in PostgreSQL on failure. Do not
+                # advance or discard its cursor, and never zero the counters.
             db.commit()
     return True
 

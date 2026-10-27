@@ -6,6 +6,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -358,6 +359,9 @@ class MercadoLivreSyncJobModel(Base):
     status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
     phase: Mapped[str] = mapped_column(String(20), default="listings")
     scroll_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Stage the API scan page before requesting /items/bulk: retries reuse IDs.
+    pending_listing_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    pending_next_scroll_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     scroll_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True)
     orders_offset: Mapped[int] = mapped_column(Integer, default=0)

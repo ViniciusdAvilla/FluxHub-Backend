@@ -680,3 +680,147 @@ def test_background_job_runs_after_browser_request_and_records_progress(client, 
             MercadoLivreSyncJobModel.user_id == user_id)).status == "completed"
         assert len(db.scalars(select(MercadoLivreListingSnapshotModel)).all()) == 1
         assert len(db.scalars(select(MercadoLivreOrderSnapshotModel)).all()) == 1
+
+
+
+def _connected_ml_account(Session, seller_id=34567):
+    from datetime import datetime, timedelta, timezone
+    from app.core.security import encrypt_token
+    from app.database.models import MercadoLivreConnectionModel
+    with Session() as db:
+        user = db.scalar(select(UserModel).where(UserModel.email == "admin@example.com"))
+        db.add(MercadoLivreConnectionModel(
+            user_id=user.id, mercado_livre_user_id=seller_id,
+            access_token_encrypted=encrypt_token("fake-access"),
+            refresh_token_encrypted=encrypt_token("fake-refresh"),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        ))
+        db.add(CompanyDataSourceModel(
+            company_id=user.id, provider="mercado_livre",
+            account_key=f"ml:{seller_id}", display_name="Seller",
+            enabled=True, connected=True,
+        ))
+        db.commit()
+        return user.id
+
+
+def test_sync_pause_is_durable_and_resume_preserves_checkpoint(client, monkeypatch):
+    import asyncio
+    from app.database.models import MercadoLivreSyncJobModel
+    from app.services import ml_sync_worker as worker
+
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    _connected_ml_account(Session)
+    created = c.post("/api/v1/analytics/sync-jobs",
+                     headers=headers, params={"account_id": 34567})
+    assert created.status_code == 202
+    with Session() as db:
+        job = db.scalar(select(MercadoLivreSyncJobModel))
+        job.listings_saved = 123
+        job.listings_scanned = 123
+        job.pending_listing_ids = ["MLB10001", "MLB10002"]
+        job.pending_next_scroll_id = "cursor-next"
+        db.commit()
+
+    paused = c.post("/api/v1/analytics/sync-jobs/34567/pause", headers=headers)
+    assert paused.status_code == 200
+    assert paused.json()["status"] == "paused"
+    assert paused.json()["pending_listings_count"] == 2
+    monkeypatch.setattr(worker, "SessionLocal", Session)
+    assert asyncio.run(worker.process_one_sync_batch()) is False
+    resumed = c.post("/api/v1/analytics/sync-jobs",
+                     headers=headers, params={"account_id": 34567})
+    assert resumed.status_code == 202
+    assert resumed.json()["status"] == "queued"
+    assert resumed.json()["listings_saved"] == 123
+    with Session() as db:
+        job = db.scalar(select(MercadoLivreSyncJobModel))
+        assert job.pending_listing_ids == ["MLB10001", "MLB10002"]
+
+
+def test_staged_scan_retries_bulk_without_scanning_again(client, monkeypatch):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from app.database.models import MercadoLivreSyncJobModel
+    from app.services import ml_sync_worker as worker
+
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    _connected_ml_account(Session)
+    assert c.post("/api/v1/analytics/sync-jobs", headers=headers,
+                  params={"account_id": 34567}).status_code == 202
+    scans = []
+    bulk_attempts = []
+    async def fake_request(db, account, path, params=None):
+        if path.endswith("/items/search"):
+            scans.append(path)
+            return {"results": ["MLB11111"], "scroll_id": None,
+                    "paging": {"total": 1}}
+        if path == "/items/bulk":
+            bulk_attempts.append(path)
+            if len(bulk_attempts) == 1:
+                from fastapi import HTTPException
+                raise HTTPException(502, "Detalhes indisponíveis")
+            return [{"status_code": 200, "body": {
+                "id": "MLB11111", "seller_id": 34567, "title": "Item",
+                "status": "active", "price": 10, "attributes": [],
+            }}]
+        if path.endswith("/items_visits/time_window"):
+            return {"results": []}
+        raise AssertionError(path)
+    monkeypatch.setattr("app.routers.analytics.seller_request", fake_request)
+    monkeypatch.setattr(worker, "SessionLocal", Session)
+    assert asyncio.run(worker.process_one_sync_batch()) is True
+    with Session() as db:
+        job = db.scalar(select(MercadoLivreSyncJobModel))
+        assert job.status == "retry"
+        assert job.pending_listing_ids == ["MLB11111"]
+        assert job.listings_scanned == 0
+        job.retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+    assert asyncio.run(worker.process_one_sync_batch()) is True
+    assert len(scans) == 1
+    with Session() as db:
+        job = db.scalar(select(MercadoLivreSyncJobModel))
+        assert job.pending_listing_ids is None
+        assert job.listings_saved == 1
+        assert job.phase == "orders"
+
+
+def test_revenue_uses_paid_orders_not_listing_prices(client):
+    from datetime import datetime, timezone
+    from app.database.models import (
+        MercadoLivreSyncJobModel, MercadoLivreOrderSnapshotModel,
+    )
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    user_id = _connected_ml_account(Session)
+    with Session() as db:
+        for external_id, status, amount in [
+            ("1", "paid", 120.0), ("2", "payment_required", 450.0),
+            ("3", "cancelled", 70.0),
+        ]:
+            db.add(MercadoLivreOrderSnapshotModel(
+                user_id=user_id, mercado_livre_user_id=34567,
+                external_id=external_id, status=status, total_amount=amount,
+                created_at=datetime.now(timezone.utc), is_cancelled=status == "cancelled",
+            ))
+        db.commit()
+    partial = c.get("/api/v1/sales/?days=30", headers=headers)
+    assert partial.status_code == 200
+    assert partial.json()["partial_data"] is True
+    assert partial.json()["paid_order_count"] == 1
+    assert partial.json()["gross_paid_order_amount"] == 120.0
+
+    orders_job = c.post("/api/v1/analytics/sync-jobs/34567/orders", headers=headers)
+    assert orders_job.status_code == 202
+    assert orders_job.json()["phase"] == "orders"
+    with Session() as db:
+        job = db.scalar(select(MercadoLivreSyncJobModel))
+        job.phase = "done"
+        job.status = "completed"
+        db.commit()
+    complete = c.get("/api/v1/sales/?days=30", headers=headers)
+    assert complete.json()["data_complete"] is True
+    assert complete.json()["gross_paid_order_amount"] == 120.0

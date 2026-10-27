@@ -143,6 +143,21 @@ async def sync(account_id: int | None = None,
                db: Session = Depends(get_db),
                orders_created_from: datetime | None = None,
                orders_created_to: datetime | None = None):
+    return await _sync_batch(
+        account_id=account_id, offset=offset, limit=limit, phase=phase,
+        scroll_id=scroll_id, user=user, db=db,
+        orders_created_from=orders_created_from,
+        orders_created_to=orders_created_to,
+    )
+
+
+async def _sync_batch(
+    account_id: int | None, offset: int, limit: int, phase: str,
+    scroll_id: str | None, user: UserModel, db: Session,
+    orders_created_from: datetime | None = None,
+    orders_created_to: datetime | None = None,
+    prefetched_page: dict | None = None,
+):
     """Persist one bounded batch. Scan+scroll retrieves listings beyond the 1000-offset cap.
 
     Each page is an independent transaction; repeating a page is safe because
@@ -171,18 +186,21 @@ async def sync(account_id: int | None = None,
     page = {"results": []}
     next_scroll_id = None
     if phase != "orders":
-        params = ({"search_type": "scan", **({"scroll_id": scroll_id} if scroll_id else {})}
-                  if phase == "listings" else {"limit": limit, "offset": offset})
-        try:
-            page = await seller_request(db, account, f"/users/{seller_id}/items/search", params)
-        except HTTPException as exc:
-            if exc.status_code == 429:
-                # No page was consumed; the worker may reuse its last
-                # confirmed cursor once the upstream Retry-After has passed.
-                raise HTTPException(429, exc.detail, headers={
-                    **(exc.headers or {}), "X-FluxHub-Safe-Retry": "true"
-                }) from exc
-            raise
+        if prefetched_page is not None:
+            # The durable worker has already stored this page's IDs and cursor.
+            # A failed /items/bulk must retry the same IDs, not consume scan again.
+            page = prefetched_page
+        else:
+            params = ({"search_type": "scan", **({"scroll_id": scroll_id} if scroll_id else {})}
+                      if phase == "listings" else {"limit": limit, "offset": offset})
+            try:
+                page = await seller_request(db, account, f"/users/{seller_id}/items/search", params)
+            except HTTPException as exc:
+                if exc.status_code == 429:
+                    raise HTTPException(429, exc.detail, headers={
+                        **(exc.headers or {}), "X-FluxHub-Safe-Retry": "true"
+                    }) from exc
+                raise
         if not isinstance(page, dict):
             raise HTTPException(502, "Resposta de anúncios inválida.")
         if phase == "listings":
