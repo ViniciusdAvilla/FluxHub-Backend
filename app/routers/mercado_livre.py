@@ -54,15 +54,18 @@ def _resource_category(path: str) -> str:
 
 
 async def seller_request(db: Session, connection: MercadoLivreConnectionModel,
-                         path: str, params: dict | None = None):
+                         path: str, params: dict | None = None,
+                         headers: dict[str, str] | None = None):
     category = _resource_category(path)
     try:
         token = await get_valid_access_token(connection, db)
+        # Only this documented API version header can be added by callers.
+        extra = {"X-Api-Version": "2"} if headers and headers.get("X-Api-Version") == "2" else {}
         async with httpx.AsyncClient(timeout=25) as client:
             response = await client.get(
                 f"{API_BASE_URL}{path}",
                 params=params,
-                headers={"Authorization": f"Bearer {token}"})
+                headers={"Authorization": f"Bearer {token}", **extra})
             response.raise_for_status()
             return response.json()
     except httpx.HTTPStatusError as error:
@@ -313,6 +316,7 @@ async def live_items(
                 "id": str(body["id"]), "title": str(body.get("title") or "")[:255],
                 "status": str(body.get("status") or "unknown")[:40],
                 "price": body.get("price"), "stock": body.get("available_quantity"),
+                "thumbnail": (body.get("secure_thumbnail") or body.get("thumbnail")),
             })
     paging = page.get("paging")
     total = paging.get("total") if isinstance(paging, dict) else None

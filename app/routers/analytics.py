@@ -1,6 +1,7 @@
 """Snapshot-based seller analytics. Never fabricate marketplace metrics."""
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -13,6 +14,9 @@ from app.database.models import (
     MercadoLivreProductCostModel as Cost,
     MercadoLivreAdsDailySnapshotModel as Ads,
     MercadoLivreVisitDailySnapshotModel as Visits,
+    MercadoLivreOrderLineModel as OrderLine,
+    MercadoLivreListingPhotoModel as ListingPhoto,
+    MercadoLivreBuyerOrderModel as BuyerOrder,
 )
 from app.database.session import get_db
 from app.routers.mercado_livre import get_account, seller_request
@@ -61,6 +65,37 @@ def parse_date(value):
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         raise HTTPException(502, "Data inválida recebida do marketplace.")
+
+
+def safe_public_thumbnail(value):
+    """Only permit public ML CDN images, never arbitrary injected hosts."""
+    if not isinstance(value, str) or len(value) > 1000:
+        return None
+    uri = urlparse(value)
+    host = (uri.hostname or "").lower()
+    if uri.scheme == "https" and (host == "mlstatic.com" or host.endswith(".mlstatic.com")):
+        return value
+    return None
+
+
+def thumbnail_from_item(item):
+    images = item.get("pictures")
+    first = images[0] if isinstance(images, list) and images else {}
+    if not isinstance(first, dict):
+        first = {}
+    for candidate in (item.get("secure_thumbnail"), item.get("thumbnail"),
+                      first.get("secure_url"), first.get("url")):
+        safe = safe_public_thumbnail(candidate)
+        if safe:
+            return safe
+    return None
+
+
+def optional_money(value):
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def store_cost(db, user_id, external_id, body):
@@ -249,6 +284,11 @@ async def _sync_batch(
             ProductModel.company_id == user.id,
             ProductModel.source_key == source_key,
             ProductModel.external_id.in_(detail_ids))).all()}
+    photos_by_id = {row.external_id: row for row in db.scalars(
+        select(ListingPhoto).where(
+            ListingPhoto.user_id == user.id,
+            ListingPhoto.mercado_livre_user_id == seller_id,
+            ListingPhoto.external_id.in_(detail_ids))).all()}
     imported = 0
     saved_products = 0
     for item in details:
@@ -258,6 +298,13 @@ async def _sync_batch(
         if not item_id:
             raise HTTPException(502, "Anúncio sem identificador.")
         title = str(item.get("title") or "")[:255]
+        photo = photos_by_id.get(item_id)
+        if photo is None:
+            photo = ListingPhoto(user_id=user.id, mercado_livre_user_id=seller_id,
+                                 external_id=item_id)
+            db.add(photo)
+            photos_by_id[item_id] = photo
+        photo.photo_url = thumbnail_from_item(item)
         listing = listings_by_id.get(item_id)
         if listing is None:
             listing = Listing(user_id=user.id, mercado_livre_user_id=seller_id,
@@ -337,6 +384,17 @@ async def _sync_batch(
                 Order.user_id == user.id,
                 Order.mercado_livre_user_id == seller_id,
                 Order.external_id.in_(order_ids))).all()}
+        existing_lines = db.scalars(select(OrderLine).where(
+            OrderLine.user_id == user.id,
+            OrderLine.mercado_livre_user_id == seller_id,
+            OrderLine.order_external_id.in_(order_ids))).all()
+        lines_by_key = {(line.order_external_id, line.line_number): line
+                        for line in existing_lines}
+        buyers_by_order = {row.order_external_id: row for row in db.scalars(
+            select(BuyerOrder).where(
+                BuyerOrder.user_id == user.id,
+                BuyerOrder.mercado_livre_user_id == seller_id,
+                BuyerOrder.order_external_id.in_(order_ids))).all()}
         saved_orders = 0
         for item in orders_page.get("results", []):
             if not isinstance(item, dict) or not item.get("id"):
@@ -355,6 +413,48 @@ async def _sync_batch(
             row.total_amount = float(item.get("total_amount") or 0)
             row.created_at = parse_date(item.get("date_created"))
             row.is_cancelled = row.status == "cancelled"
+            buyer = item.get("buyer") or {}
+            raw_buyer_id = buyer.get("id") if isinstance(buyer, dict) else None
+            if raw_buyer_id is not None and str(raw_buyer_id).isdigit():
+                buyer_row = buyers_by_order.get(external_id)
+                if buyer_row is None:
+                    buyer_row = BuyerOrder(
+                        user_id=user.id, mercado_livre_user_id=seller_id,
+                        order_external_id=external_id)
+                    db.add(buyer_row)
+                    buyers_by_order[external_id] = buyer_row
+                buyer_row.buyer_id = int(raw_buyer_id)
+            line_items = item.get("order_items") or []
+            if not isinstance(line_items, list):
+                raise HTTPException(502, "Itens do pedido inválidos.")
+            for position, source_line in enumerate(line_items):
+                if not isinstance(source_line, dict):
+                    raise HTTPException(502, "Item de pedido inválido.")
+                item_data = source_line.get("item") or {}
+                if not isinstance(item_data, dict):
+                    raise HTTPException(502, "Identificação do produto inválida.")
+                item_external_id = str(item_data.get("id") or "")[:100]
+                if not item_external_id:
+                    raise HTTPException(502, "Produto de pedido sem identificador.")
+                key = (external_id, position)
+                line = lines_by_key.get(key)
+                if line is None:
+                    line = OrderLine(user_id=user.id,
+                                     mercado_livre_user_id=seller_id,
+                                     order_external_id=external_id,
+                                     line_number=position)
+                    db.add(line)
+                    lines_by_key[key] = line
+                line.item_id = item_external_id
+                line.title = str(item_data.get("title") or "Produto sem título")[:255]
+                line.sku = str(item_data.get("seller_custom_field") or "")[:150] or None
+                line.quantity = int(source_line.get("quantity") or 0)
+                line.unit_price = float(source_line.get("unit_price") or 0)
+                line.sale_fee = optional_money(source_line.get("sale_fee"))
+            for key, previous in list(lines_by_key.items()):
+                if key[0] == external_id and key[1] >= len(line_items):
+                    db.delete(previous)
+                    del lines_by_key[key]
             saved_orders += 1
 
     # The visit metric is optional and is fetched once on the initial listings batch.

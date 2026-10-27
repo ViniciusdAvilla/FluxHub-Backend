@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
     Date,
     DateTime,
     Float,
@@ -209,6 +210,63 @@ class MercadoLivreProductCostModel(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class MercadoLivreListingPhotoModel(Base):
+    """Public listing thumbnail; isolated by tenant and connected seller."""
+    __tablename__ = "mercado_livre_listing_photos"
+    __table_args__ = (
+        UniqueConstraint("user_id", "mercado_livre_user_id", "external_id",
+                         name="uq_ml_photo_tenant_seller_item"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("fluxhub_users.id", ondelete="CASCADE"), index=True)
+    mercado_livre_user_id: Mapped[int] = mapped_column(Integer, index=True)
+    external_id: Mapped[str] = mapped_column(String(100), index=True)
+    photo_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc))
+
+
+class MercadoLivreOrderLineModel(Base):
+    """Non-PII order items returned in each seller's authorized order search."""
+    __tablename__ = "mercado_livre_order_lines"
+    __table_args__ = (
+        UniqueConstraint("user_id", "mercado_livre_user_id", "order_external_id",
+                         "line_number", name="uq_ml_order_line_tenant"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("fluxhub_users.id", ondelete="CASCADE"), index=True)
+    mercado_livre_user_id: Mapped[int] = mapped_column(Integer, index=True)
+    order_external_id: Mapped[str] = mapped_column(String(100), index=True)
+    line_number: Mapped[int] = mapped_column(Integer)
+    item_id: Mapped[str] = mapped_column(String(100), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    sku: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    quantity: Mapped[int] = mapped_column(Integer)
+    unit_price: Mapped[float] = mapped_column(Float)
+    sale_fee: Mapped[float | None] = mapped_column(Float, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc))
+
+
+class MercadoLivreBuyerOrderModel(Base):
+    """Buyer ID alone: contact details and tax IDs are NEVER persisted here."""
+    __tablename__ = "mercado_livre_buyer_orders"
+    __table_args__ = (
+        UniqueConstraint("user_id", "mercado_livre_user_id", "order_external_id",
+                         name="uq_ml_buyer_order_tenant"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("fluxhub_users.id", ondelete="CASCADE"), index=True)
+    mercado_livre_user_id: Mapped[int] = mapped_column(Integer, index=True)
+    order_external_id: Mapped[str] = mapped_column(String(100), index=True)
+    buyer_id: Mapped[int] = mapped_column(BigInteger, index=True)
 
 
 class MercadoLivreOrderSnapshotModel(Base):
