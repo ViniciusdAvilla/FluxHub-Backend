@@ -936,6 +936,7 @@ def test_orders_only_can_override_waiting_listing_retry(client):
 
 def test_listing_batch_skips_permanently_unavailable_item_without_losing_page(client, monkeypatch):
     """One removed item (HTTP 404 in /items/bulk) must not block seller orders."""
+    from sqlalchemy import func
     c, Session = client
     headers = login(c, "admin@example.com", "AdminPassw0rd!")
     user_id = _connected_ml_account(Session)
