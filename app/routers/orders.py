@@ -5,6 +5,7 @@ Only authenticated tenant owners may request live buyer details for an order
 which already belongs to their authorized Mercado Livre account.
 """
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -261,6 +262,74 @@ def order_detail(
     db: Session = Depends(get_db),
 ):
     return _decorate(db, [_order_for_user(db, user.id, order_id, account_id)])[0]
+
+
+@router.post("/{order_id}/refresh-items")
+async def refresh_order_items(
+    order_id: str,
+    account_id: int = Query(ge=1),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Repair one legacy order without rescanning the catalogue or touching OAuth.
+
+    Only item descriptions and prices are persisted. The upstream order must
+    belong to the seller connected to the authenticated FluxHub tenant.
+    """
+    order = _order_for_user(db, user.id, order_id, account_id)
+    seller_id = order.mercado_livre_user_id
+    if seller_id is None:
+        raise HTTPException(409, "Este pedido ainda não possui uma conta Mercado Livre associada.")
+    filters = (
+        OrderLine.user_id == user.id,
+        OrderLine.mercado_livre_user_id == seller_id,
+        OrderLine.order_external_id == order_id,
+    )
+    if db.scalar(select(OrderLine.id).where(*filters).limit(1)) is not None:
+        return _decorate(db, [order])[0]
+
+    account = get_account(db, user.id, seller_id)
+    raw = await seller_request(db, account, f"/orders/{order_id}")
+    if not isinstance(raw, dict) or str(raw.get("id")) != order_id or not isinstance(raw.get("seller"), dict) or (
+        str(raw["seller"].get("id")) != str(seller_id)
+    ):
+        raise HTTPException(502, "Resposta de pedido inválida para o vendedor conectado.")
+    source_items = raw.get("order_items")
+    if not isinstance(source_items, list) or not source_items:
+        raise HTTPException(409, "Mercado Livre ainda não disponibilizou os itens deste pedido.")
+    if len(source_items) > 100:
+        raise HTTPException(502, "Quantidade inesperada de itens no pedido.")
+
+    staged = []
+    for position, entry in enumerate(source_items):
+        item = entry.get("item") if isinstance(entry, dict) else None
+        item_id = item.get("id") if isinstance(item, dict) else None
+        if not isinstance(item_id, str) or not item_id.isalnum() or len(item_id) > 100:
+            raise HTTPException(502, "Identificador de produto inválido no pedido.")
+        try:
+            quantity = int(entry.get("quantity") or 0)
+            unit_price = float(entry.get("unit_price") or 0)
+            sale_fee = (float(entry["sale_fee"]) if entry.get("sale_fee") is not None else None)
+        except (ValueError, TypeError, OverflowError):
+            raise HTTPException(502, "Valores de item inválidos no pedido.")
+        if quantity <= 0 or not isfinite(unit_price) or not 0 <= unit_price <= 1_000_000_000 or (sale_fee is not None and not isfinite(sale_fee)):
+            raise HTTPException(502, "Valores de item fora do intervalo esperado.")
+        title = str(item.get("title") or "Produto sem título")[:255]
+        sku = str(item.get("seller_custom_field") or "")[:150] or None
+        staged.append((position, item_id, title, sku, quantity, unit_price, sale_fee))
+
+    # Lock only while writing. A second concurrent repair cannot duplicate lines.
+    db.scalar(select(Order.id).where(Order.id == order.id).with_for_update())
+    if db.scalar(select(OrderLine.id).where(*filters).limit(1)) is None:
+        for position, item_id, title, sku, quantity, unit_price, sale_fee in staged:
+            db.add(OrderLine(
+                user_id=user.id, mercado_livre_user_id=seller_id,
+                order_external_id=order_id, line_number=position,
+                item_id=item_id, title=title, sku=sku,
+                quantity=quantity, unit_price=unit_price, sale_fee=sale_fee,
+            ))
+        db.commit()
+    return _decorate(db, [order])[0]
 
 
 def _name(raw: Any) -> str | None:
