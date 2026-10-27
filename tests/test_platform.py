@@ -966,3 +966,94 @@ def test_listing_batch_skips_permanently_unavailable_item_without_losing_page(cl
         assert db.scalar(select(func.count(Listing.id)).where(
             Listing.user_id == user_id,
             Listing.mercado_livre_user_id == 34567)) == 1
+
+
+def test_refresh_order_items_fetches_live_detail_only_for_owned_order(client, monkeypatch):
+    """Legacy snapshots can recover product lines without resetting seller OAuth."""
+    from datetime import datetime, timezone
+    from sqlalchemy import func
+    from app.database.models import (
+        MercadoLivreOrderSnapshotModel as Order,
+        MercadoLivreOrderLineModel as OrderLine,
+        MercadoLivreConnectionModel as Connection,
+        MercadoLivreListingPhotoModel as Photo,
+    )
+
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    user_id = _connected_ml_account(Session)
+    with Session() as db:
+        db.add(Order(user_id=user_id, mercado_livre_user_id=34567,
+                     external_id="23456001", status="paid", total_amount=89.99,
+                     created_at=datetime.now(timezone.utc), is_cancelled=False))
+        db.add(Photo(user_id=user_id, mercado_livre_user_id=34567,
+                     external_id="MLB19191919",
+                     photo_url="https://http2.mlstatic.com/D_12345.jpg"))
+        db.commit()
+
+    called = []
+    async def fake_request(db, account, path, params=None):
+        called.append(path)
+        assert path == "/orders/23456001"
+        return {
+            "id": 23456001, "seller": {"id": 34567},
+            "buyer": {"email": "must-not-be-persisted@example.com"},
+            "order_items": [{
+                "item": {"id": "MLB19191919", "title": "Produto original",
+                         "seller_custom_field": "SKU-VENDAS"},
+                "quantity": 2, "unit_price": 44.995, "sale_fee": 5.0,
+            }],
+        }
+    monkeypatch.setattr("app.routers.orders.seller_request", fake_request)
+    endpoint = "/api/v1/orders/23456001/refresh-items?account_id=34567"
+    response = c.post(endpoint, headers=headers)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["items"][0]["title"] == "Produto original"
+    assert payload["items"][0]["quantity"] == 2
+    assert payload["items"][0]["thumbnail"].startswith("https://")
+    assert "buyer" not in payload
+    # Idempotency: existing lines do not trigger additional external requests.
+    assert c.post(endpoint, headers=headers).status_code == 200
+    assert called == ["/orders/23456001"]
+    with Session() as db:
+        assert db.scalar(select(func.count(OrderLine.id)).where(
+            OrderLine.user_id == user_id, OrderLine.mercado_livre_user_id == 34567,
+            OrderLine.order_external_id == "23456001")) == 1
+        assert db.scalar(select(func.count(Connection.id)).where(
+            Connection.user_id == user_id)) == 1
+
+
+def test_refresh_order_items_rejects_wrong_seller_without_persisting(client, monkeypatch):
+    """An upstream order for another seller cannot become tenant-visible data."""
+    from datetime import datetime, timezone
+    from sqlalchemy import func
+    from app.database.models import (
+        MercadoLivreOrderSnapshotModel as Order,
+        MercadoLivreOrderLineModel as OrderLine,
+    )
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    user_id = _connected_ml_account(Session)
+    with Session() as db:
+        db.add(Order(user_id=user_id, mercado_livre_user_id=34567,
+                     external_id="23456002", status="paid", total_amount=10,
+                     created_at=datetime.now(timezone.utc), is_cancelled=False))
+        db.commit()
+
+    async def fake_request(db, account, path, params=None):
+        return {
+            "id": 23456002, "seller": {"id": 98765},
+            "order_items": [{
+                "item": {"id": "MLB19191920", "title": "Outro vendedor"},
+                "quantity": 1, "unit_price": 10,
+            }],
+        }
+    monkeypatch.setattr("app.routers.orders.seller_request", fake_request)
+    result = c.post("/api/v1/orders/23456002/refresh-items?account_id=34567",
+                    headers=headers)
+    assert result.status_code == 502
+    with Session() as db:
+        assert db.scalar(select(func.count(OrderLine.id)).where(
+            OrderLine.user_id == user_id,
+            OrderLine.order_external_id == "23456002")) == 0
