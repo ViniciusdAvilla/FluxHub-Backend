@@ -12,13 +12,12 @@ router = APIRouter(prefix="/stock", tags=["Stock"])
 @router.get("/")
 def stock(user: UserModel = Depends(get_current_user),
           db: Session = Depends(get_db)):
-    products = ProductRepository(db, company_id=user.id).get_all()
+    summary = ProductRepository(db, company_id=user.id).get_catalog_summary()
     return {
-        "total_products": len(products),
-        "total_stock": sum(p.stock_qty for p in products
-                           if p.stock_qty is not None),
-        "unknown_stock_items": sum(p.stock_qty is None for p in products),
-        "out_of_stock": sum(p.stock_qty == 0 for p in products),
-        "low_stock": sum(p.stock_qty is not None and 0 < p.stock_qty <= 10 for p in products),
+        "total_products": summary["total_products"],
+        "total_stock": summary["total_stock_known"],
+        "unknown_stock_items": summary["unknown_stock_items"],
+        "out_of_stock": summary["out_of_stock"],
+        "low_stock": summary["low_stock"],
         "source": "stored_catalog",
     }

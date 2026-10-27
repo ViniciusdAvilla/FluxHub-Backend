@@ -258,3 +258,16 @@ Mercado Livre estabelece disponibilidade de pedidos de até 12 meses e
 limites de requisição. Informações sem permissão/endpoint autorizado
 (ex.: relatórios Product Ads, informações financeiras Mercado Pago) não são
 inventadas nem marcadas como sincronizadas pela rotina.
+
+
+## Organização do backend
+
+O código mantido é o pacote `app/` e a API é iniciada por `app.main:app`;
+`main:app` é um ponto de entrada compatível. Os módulos de protótipo
+que não eram montados no FastAPI foram removidos da raiz. As métricas
+de estoque e dashboard são calculadas diretamente no PostgreSQL.
+
+Veja [o inventário de rotas e a política de compatibilidade](docs/BACKEND_CLEANUP.md).
+
+Dependências de produção: `pip install -r requirements.txt`.
+Testes e CI: `pip install -r requirements-dev.txt`.

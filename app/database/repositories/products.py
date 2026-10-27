@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.database.models import CompanyDataSourceModel, ProductModel
@@ -100,40 +100,75 @@ class ProductRepository:
             unique_products.setdefault(product.external_id, product)
         return list(unique_products.values())
 
-    def get_indicators(self):
+    def get_catalog_summary(self) -> dict:
+        """Aggregate visible products in SQL; preserve first-ID deduplication.
 
-        products = self.get_all()
+        ProductRepository.get_all() intentionally keeps one row per external ID
+        across enabled company sources, ordered by the oldest database row.
+        A window subquery applies that same rule without materializing 10k+
+        ORM instances just to calculate dashboard totals.
+        """
+        if self.company_id is None:
+            visible_ids = select(ProductModel.id)
+        else:
+            enabled_sources = select(CompanyDataSourceModel.account_key).where(
+                CompanyDataSourceModel.company_id == self.company_id,
+                CompanyDataSourceModel.enabled.is_(True),
+            )
+            ranked = select(
+                ProductModel.id.label("product_id"),
+                func.row_number().over(
+                    partition_by=ProductModel.external_id,
+                    order_by=ProductModel.id,
+                ).label("position"),
+            ).where(
+                ProductModel.company_id == self.company_id,
+                ProductModel.source_key.in_(enabled_sources),
+            ).subquery()
+            visible_ids = select(ranked.c.product_id).where(ranked.c.position == 1)
 
-        if not products:
-            return {
-                "total_products": 0,
-                "avg_original_price": None,
-                "avg_promotional_price": None,
-                "avg_discount": None,
-                "total_stock": 0,
-                "avg_rating": None,
-            }
-        def average(values: list[float | int | None]) -> float | None:
-            known = [value for value in values if value is not None]
-            return sum(known) / len(known) if known else None
-
+        total, stock_sum, known_stock, original, promotion, discount, rating, out_stock, low_stock = (
+            self.session.execute(
+                select(
+                    func.count(ProductModel.id),
+                    func.sum(ProductModel.stock_qty),
+                    func.count(ProductModel.stock_qty),
+                    func.avg(ProductModel.original_price),
+                    func.avg(ProductModel.promotional_price),
+                    func.avg(ProductModel.discount_rate),
+                    func.avg(ProductModel.rating),
+                    func.sum(case((ProductModel.stock_qty == 0, 1), else_=0)),
+                    func.sum(case((
+                        (ProductModel.stock_qty > 0) & (ProductModel.stock_qty <= 10),
+                        1,
+                    ), else_=0)),
+                ).where(ProductModel.id.in_(visible_ids))
+            ).one()
+        )
         return {
-            "total_products": len(products),
-            "avg_original_price": average(
-                [product.original_price for product in products]
-            ),
-            "avg_promotional_price": average(
-                [product.promotional_price for product in products]
-            ),
-            "avg_discount": average(
-                [product.discount_rate for product in products]
-            ),
+            "total_products": int(total),
+            "total_stock_known": int(stock_sum or 0),
+            "unknown_stock_items": int(total - known_stock),
+            "out_of_stock": int(out_stock or 0),
+            "low_stock": int(low_stock or 0),
+            "avg_original_price": float(original) if original is not None else None,
+            "avg_promotional_price": float(promotion) if promotion is not None else None,
+            "avg_discount": float(discount) if discount is not None else None,
+            "avg_rating": float(rating) if rating is not None else None,
+        }
+
+    def get_indicators(self):
+        summary = self.get_catalog_summary()
+        return {
+            "total_products": summary["total_products"],
+            "avg_original_price": summary["avg_original_price"],
+            "avg_promotional_price": summary["avg_promotional_price"],
+            "avg_discount": summary["avg_discount"],
             "total_stock": (
-                sum(product.stock_qty for product in products)
-                if all(product.stock_qty is not None for product in products)
-                else None
+                summary["total_stock_known"]
+                if summary["unknown_stock_items"] == 0 else None
             ),
-            "avg_rating": average([product.rating for product in products]),
+            "avg_rating": summary["avg_rating"],
         }
 
     def get_top_discount(self, limit: int = 10):
@@ -149,7 +184,7 @@ class ProductRepository:
 
     def count_products(self) -> int:
 
-        return len(self.get_all())
+        return self.get_catalog_summary()["total_products"]
 
 
 

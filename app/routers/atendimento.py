@@ -15,7 +15,7 @@ from app.database.models import UserModel
 from app.database.session import get_db
 from app.routers.mercado_livre import get_account
 
-router = APIRouter(prefix="/atendimento", tags=["Central de Atendimento"])
+router = APIRouter(prefix="/atendimento", tags=["Central de Atendimento"], deprecated=True)
 logger = logging.getLogger(__name__)
 
 AGENTS = {"MLB": 3037675074, "MLC": 3020819166, "MCO": 3037204123,

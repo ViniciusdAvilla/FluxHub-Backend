@@ -2,9 +2,6 @@ fastapi
 uvicorn
 pydantic-settings
 httpx
-sqlalchemy
-pytest
-pytest-asyncio
 SQLAlchemy>=2.0,<3
 psycopg[binary]>=3.2,<4
 alembic>=1.13,<2

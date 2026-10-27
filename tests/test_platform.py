@@ -1057,3 +1057,54 @@ def test_refresh_order_items_rejects_wrong_seller_without_persisting(client, mon
         assert db.scalar(select(func.count(OrderLine.id)).where(
             OrderLine.user_id == user_id,
             OrderLine.order_external_id == "23456002")) == 0
+
+
+def test_catalog_aggregates_preserve_enabled_source_deduplication_and_unknown_stock(client):
+    """Large dashboards use SQL aggregates with the same visibility as get_all."""
+    from app.database.repositories.products import ProductRepository
+    from app.services.dashboard import DashboardService
+
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    with Session() as db:
+        user = db.scalar(select(UserModel).where(UserModel.email == "admin@example.com"))
+        for key, enabled in (("excel", True), ("ml:123", True), ("ml:disabled", False)):
+            db.add(CompanyDataSourceModel(
+                company_id=user.id, provider="excel" if key == "excel" else "mercado_livre",
+                account_key=key, display_name=key, enabled=enabled, connected=True))
+        for key, external_id, price, stock in (
+            ("excel", "SKU-DUP", 100.0, None),
+            ("ml:123", "SKU-DUP", 999.0, 99),
+            ("ml:123", "SKU-NEW", 30.0, 5),
+            ("ml:disabled", "SKU-HIDDEN", 300.0, 100),
+        ):
+            db.add(ProductModel(
+                company_id=user.id, source_key=key, external_id=external_id,
+                title=external_id, category="Teste", brand="Teste",
+                original_price=price, promotional_price=price - 5,
+                stock_qty=stock, discount_rate=0.1, rating=None,
+                item_condition="new"))
+        db.commit()
+        repo = ProductRepository(db, company_id=user.id)
+        visible = repo.get_all()
+        assert len(visible) == 2
+        assert {p.external_id for p in visible} == {"SKU-DUP", "SKU-NEW"}
+        summary = repo.get_catalog_summary()
+        assert summary["total_products"] == len(visible)
+        assert summary["total_stock_known"] == 5
+        assert summary["unknown_stock_items"] == 1
+        assert summary["out_of_stock"] == 0
+        assert summary["low_stock"] == 1
+        assert summary["avg_original_price"] == 65.0
+        assert repo.count_products() == 2
+        assert repo.get_indicators()["total_stock"] is None
+        assert DashboardService(repo).get_dashboard()["total_stock"] is None
+
+    stock = c.get("/api/v1/stock/", headers=headers)
+    assert stock.status_code == 200, stock.text
+    assert stock.json()["total_products"] == 2
+    assert stock.json()["total_stock"] == 5
+    assert stock.json()["unknown_stock_items"] == 1
+    dashboard = c.get("/api/v1/dashboard", headers=headers)
+    assert dashboard.status_code == 200, dashboard.text
+    assert dashboard.json()["avg_original_price"] == 65.0
