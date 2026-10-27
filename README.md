@@ -268,3 +268,6 @@ que não eram montados no FastAPI foram removidos da raiz. As métricas
 de estoque e dashboard são calculadas diretamente no PostgreSQL.
 
 Veja [o inventário de rotas e a política de compatibilidade](docs/BACKEND_CLEANUP.md).
+
+Dependências de produção: `pip install -r requirements.txt`.
+Testes e CI: `pip install -r requirements-dev.txt`.
