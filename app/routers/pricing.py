@@ -1,11 +1,13 @@
 """Authenticated per-listing cost/fee quote for the FluxHub profit calculator."""
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
 from app.database.models import (
     UserModel, MercadoLivreProductCostModel as Cost,
     MercadoLivreListingPhotoModel as ListingPhoto,
+    MercadoLivreListingSnapshotModel as Listing,
 )
 from app.database.session import get_db
 from app.routers.mercado_livre import get_account, seller_request
