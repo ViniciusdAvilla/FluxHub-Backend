@@ -45,6 +45,33 @@ def _claim_job() -> int | None:
         if job is None:
             return None
 
+        # Mercado Livre scroll cursors expire quickly. If *all* API-reported
+        # listings already exist in PostgreSQL and a page is repeatedly failing,
+        # stop blocking order revenue behind another full catalog scan.
+        # Previously stored listing rows are never deleted.
+        if (job.phase == "listings" and job.retry_count > 0
+                and job.listings_total is not None and job.listings_total > 0
+                and job.listings_saved >= job.listings_total):
+            persisted = db.scalar(select(func.count(Listing.id)).where(
+                Listing.user_id == job.user_id,
+                Listing.mercado_livre_user_id == job.mercado_livre_user_id)) or 0
+            if persisted >= job.listings_total:
+                logger.warning(
+                    "ml_sync_orders_prioritized job_id=%s listings_present=%s expected=%s",
+                    job.id, persisted, job.listings_total,
+                )
+                job.phase = "orders"
+                job.scroll_id = None
+                job.scroll_updated_at = None
+                job.pending_listing_ids = None
+                job.pending_next_scroll_id = None
+                job.orders_offset = 0
+                job.orders_window_start = None
+                job.orders_window_end = None
+                job.orders_until = None
+                job.retry_count = 0
+                job.last_error = "Anúncios preservados; atualização de pedidos priorizada."
+
         # A staged scan page is safe to replay after crashes, HTTP 502 or 429.
         # If no page was staged when the lease expired, start a fresh scan but
         # keep the true number of persisted listings; never lose DB progress.
