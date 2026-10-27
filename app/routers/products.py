@@ -1,11 +1,11 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
-from app.database.models import CompanyDataSourceModel, UserModel
+from app.database.models import CompanyDataSourceModel, UserModel, MercadoLivreListingPhotoModel
 from app.database.repositories.products import ProductRepository
 from app.database.session import get_db
 from app.services.excel_import import (
@@ -82,6 +82,25 @@ async def import_excel_products(
         "enabled": True,
         "message": f"Importação concluída: {imported} produtos da planilha.",
     }
+
+
+@router.get("/photos")
+def product_photos(
+    ids: str = Query(min_length=3, max_length=12000),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    item_ids = ids.split(",")
+    if len(item_ids) > 100 or any(
+        not item.isalnum() or len(item) > 100 for item in item_ids
+    ):
+        raise HTTPException(422, "Lista de produtos inválida.")
+    records = db.scalars(select(MercadoLivreListingPhotoModel).where(
+        MercadoLivreListingPhotoModel.user_id == user.id,
+        MercadoLivreListingPhotoModel.external_id.in_(item_ids))).all()
+    return [{"account_id": item.mercado_livre_user_id,
+             "item_id": item.external_id,
+             "thumbnail": item.photo_url} for item in records]
 
 
 @router.get("/")

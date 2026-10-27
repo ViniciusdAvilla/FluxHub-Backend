@@ -23,6 +23,7 @@ from app.routers.indicators import router as indicators_router
 from app.routers.stock import router as stock_router
 from app.routers.sales import router as sales_router
 from app.routers.dashboard import router as dashboard_router
+from app.routers.pricing import router as pricing_router
 
 
 @asynccontextmanager
