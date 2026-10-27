@@ -124,3 +124,37 @@ def test_paged_orders_with_enriched_line_and_buyer():
             assert paged_orders(**{**params, "user": SimpleNamespace(id=99)})["total"] == 0
     finally:
         db_engine.dispose()
+
+
+def test_sync_jobs_migration_adds_missing_columns_without_resetting_progress():
+    """Existing sync checkpoints must survive a schema-only upgrade."""
+    from sqlalchemy import create_engine, inspect, text
+    from app.database.order_enrichment_schema import ensure_sync_job_schema
+
+    db_engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        with db_engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE mercado_livre_sync_jobs "
+                "(id INTEGER PRIMARY KEY, status VARCHAR(20), "
+                "phase VARCHAR(20), listings_scanned INTEGER)"
+            ))
+            conn.execute(text(
+                "INSERT INTO mercado_livre_sync_jobs "
+                "(id, status, phase, listings_scanned) "
+                "VALUES (1, 'running', 'listings', 6450)"
+            ))
+        assert ensure_sync_job_schema(db_engine) == (
+            "pending_listing_ids", "pending_next_scroll_id",
+        )
+        ensure_sync_job_schema(db_engine)
+        columns = {c["name"] for c in inspect(db_engine).get_columns(
+            "mercado_livre_sync_jobs")}
+        assert {"pending_listing_ids", "pending_next_scroll_id"} <= columns
+        with db_engine.connect() as conn:
+            assert conn.execute(text(
+                "SELECT status, phase, listings_scanned "
+                "FROM mercado_livre_sync_jobs WHERE id = 1"
+            )).one() == ("running", "listings", 6450)
+    finally:
+        db_engine.dispose()
