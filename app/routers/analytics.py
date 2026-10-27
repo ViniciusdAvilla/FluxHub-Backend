@@ -3,7 +3,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
 from app.database.models import (
@@ -16,6 +16,8 @@ from app.database.models import (
 )
 from app.database.session import get_db
 from app.routers.mercado_livre import get_account, seller_request
+
+MAX_STORED_ML_LISTINGS = 3_000  # per authenticated user and connected seller account
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
@@ -182,12 +184,41 @@ async def sync(account_id: int | None = None,
     # Never silently skip malformed IDs or a partial bulk response; retry the page.
     if len(ids) > (100 if phase == "listings" else limit) or any(not isinstance(item, str) or not item.isalnum() for item in ids):
         raise HTTPException(502, "Lista de anúncios contém IDs inválidos.")
+    # Only request item details for rows that can actually be persisted.
+    # After reaching the storage limit, scroll still advances across every ID.
+    existing_listing_ids = {row[0] for row in db.execute(
+        select(Listing.external_id).where(
+            Listing.user_id == user.id,
+            Listing.mercado_livre_user_id == seller_id,
+            Listing.external_id.in_(ids))).all()}
+    existing_product_ids = {row[0] for row in db.execute(
+        select(ProductModel.external_id).where(
+            ProductModel.company_id == user.id,
+            ProductModel.source_key == source_key,
+            ProductModel.external_id.in_(ids))).all()}
+    available_listings = max(0, MAX_STORED_ML_LISTINGS - (db.scalar(
+        select(func.count()).select_from(Listing).where(
+            Listing.user_id == user.id,
+            Listing.mercado_livre_user_id == seller_id)) or 0))
+    available_products = max(0, MAX_STORED_ML_LISTINGS - (db.scalar(
+        select(func.count()).select_from(ProductModel).where(
+            ProductModel.company_id == user.id,
+            ProductModel.source_key == source_key)) or 0))
+    detail_ids = []
+    for item_id in ids:
+        has_listing = item_id in existing_listing_ids
+        has_product = item_id in existing_product_ids
+        if has_listing or has_product or available_listings or available_products:
+            detail_ids.append(item_id)
+            if not has_listing and available_listings:
+                available_listings -= 1
+            if not has_product and available_products:
+                available_products -= 1
+
     details = []
-    # The scan returns up to 100 IDs, but /items/bulk accepts only 20 per request.
-    # Validate every bulk chunk before committing, so partial API results are not
-    # mistaken for a successfully imported page.
-    for start in range(0, len(ids), 20):
-        chunk = ids[start:start + 20]
+    # /items/bulk accepts at most 20 IDs; never fetch details we cannot store.
+    for start in range(0, len(detail_ids), 20):
+        chunk = detail_ids[start:start + 20]
         data = await seller_request(db, account, "/items/bulk", {"ids": ",".join(chunk)})
         if not isinstance(data, list):
             raise HTTPException(502, "Detalhes de anúncios inválidos.")
@@ -200,62 +231,79 @@ async def sync(account_id: int | None = None,
     if not ids:
         next_scroll_id = None
 
-    # Read each existing page in two queries instead of two queries per item.
+    # Serialize persistence per seller, then recount under the database lock.
+    # Parallel browser tabs must not insert more than the permitted number.
+    db.scalar(select(CompanyDataSourceModel.id).where(
+        CompanyDataSourceModel.company_id == user.id,
+        CompanyDataSourceModel.provider == "mercado_livre",
+        CompanyDataSourceModel.account_key == source_key).with_for_update())
     listings_by_id = {row.external_id: row for row in db.scalars(
         select(Listing).where(
             Listing.user_id == user.id,
             Listing.mercado_livre_user_id == seller_id,
-            Listing.external_id.in_(ids))).all()}
+            Listing.external_id.in_(detail_ids))).all()}
     products_by_id = {row.external_id: row for row in db.scalars(
         select(ProductModel).where(
             ProductModel.company_id == user.id,
             ProductModel.source_key == source_key,
-            ProductModel.external_id.in_(ids))).all()}
+            ProductModel.external_id.in_(detail_ids))).all()}
+    listing_count = db.scalar(select(func.count()).select_from(Listing).where(
+        Listing.user_id == user.id,
+        Listing.mercado_livre_user_id == seller_id)) or 0
+    product_count = db.scalar(select(func.count()).select_from(ProductModel).where(
+        ProductModel.company_id == user.id,
+        ProductModel.source_key == source_key)) or 0
     imported = 0
+    saved_products = 0
     for item in details:
         if int(item.get("seller_id") or 0) != seller_id:
             continue
         item_id = str(item.get("id") or "")
         if not item_id:
             continue
+        title = str(item.get("title") or "")[:255]
         listing = listings_by_id.get(item_id)
-        if listing is None:
+        if listing is None and listing_count < MAX_STORED_ML_LISTINGS:
             listing = Listing(user_id=user.id, mercado_livre_user_id=seller_id,
                               external_id=item_id)
             db.add(listing)
             listings_by_id[item_id] = listing
-        listing.title = str(item.get("title") or "")[:255]
-        listing.category_id = item.get("category_id")
-        listing.status = str(item.get("status") or "unknown")[:40]
-        listing.listing_type_id = item.get("listing_type_id")
-        listing.price = float(item.get("price") or 0)
-        listing.currency_id = item.get("currency_id")
-        listing.published_at = parse_date(item["date_created"]) if item.get("date_created") else None
-        listing.captured_at = now()
-        # No synthetic 30-day visits or orders; use real Ads reports separately.
+            listing_count += 1
+        if listing is not None:
+            listing.title = title
+            listing.category_id = item.get("category_id")
+            listing.status = str(item.get("status") or "unknown")[:40]
+            listing.listing_type_id = item.get("listing_type_id")
+            listing.price = float(item.get("price") or 0)
+            listing.currency_id = item.get("currency_id")
+            listing.published_at = parse_date(item["date_created"]) if item.get("date_created") else None
+            listing.captured_at = now()
+            imported += 1
+
         product = products_by_id.get(item_id)
-        if product is None:
+        if product is None and product_count < MAX_STORED_ML_LISTINGS:
             product = ProductModel(company_id=user.id, source_key=source_key,
                                    external_id=item_id, category="", brand="")
             db.add(product)
             products_by_id[item_id] = product
-        product.title = listing.title
-        product.category = str(item.get("category_id") or "Sem categoria")
-        brand = next((a.get("value_name") for a in item.get("attributes", [])
-                      if isinstance(a, dict) and a.get("id") == "BRAND"), None)
-        product.brand = str(brand or "Sem marca")[:100]
-        product.original_price = float(item.get("original_price") or item.get("price") or 0)
-        product.promotional_price = float(item.get("price") or 0)
-        product.discount_rate = (
-            round(100 * (product.original_price - product.promotional_price) /
-                  product.original_price, 2) if product.original_price > 0 else 0)
-        product.stock_qty = item.get("available_quantity")
-        product.sales_30d = None
-        product.rating = None
-        product.is_free_shipping = bool((item.get("shipping") or {}).get("free_shipping", False))
-        product.item_condition = str(item.get("condition") or "unknown")[:50]
-        imported += 1
-
+            product_count += 1
+        if product is not None:
+            product.title = title
+            product.category = str(item.get("category_id") or "Sem categoria")
+            brand = next((a.get("value_name") for a in item.get("attributes", [])
+                          if isinstance(a, dict) and a.get("id") == "BRAND"), None)
+            product.brand = str(brand or "Sem marca")[:100]
+            product.original_price = float(item.get("original_price") or item.get("price") or 0)
+            product.promotional_price = float(item.get("price") or 0)
+            product.discount_rate = (
+                round(100 * (product.original_price - product.promotional_price) /
+                      product.original_price, 2) if product.original_price > 0 else 0)
+            product.stock_qty = item.get("available_quantity")
+            product.sales_30d = None
+            product.rating = None
+            product.is_free_shipping = bool((item.get("shipping") or {}).get("free_shipping", False))
+            product.item_condition = str(item.get("condition") or "unknown")[:50]
+            saved_products += 1
 
     # Orders use a separate offset. A listing scan must not stop order pagination.
     orders_unavailable = False
@@ -339,11 +387,13 @@ async def sync(account_id: int | None = None,
             visits_error = True
 
     source.last_synced_at = now()
-    source.status_message = (f"{imported} anúncios e {saved_orders} pedidos nesta página."
+    source.status_message = (f"{len(ids)} anúncios consultados; {imported} armazenados/atualizados e {saved_orders} pedidos nesta página."
                              + (" Consulta de pedidos indisponível." if orders_unavailable else ""))
     db.commit()
     return {
-        "source": source_key, "listings": imported, "orders": saved_orders,
+        "source": source_key, "listings": len(ids), "saved_listings": imported,
+        "saved_products": saved_products, "storage_limit": MAX_STORED_ML_LISTINGS,
+        "orders": saved_orders,
         "phase": phase, "offset": offset, "limit": limit,
         "next_scroll_id": next_scroll_id if phase == "listings" else None,
         "next_orders_offset": next_orders_offset,
