@@ -66,7 +66,7 @@ def test_enrichment_migration_is_additive_and_idempotent():
 def test_pricing_endpoint_is_registered():
     """Prevent 404 when the frontend opens the product profitability calculator."""
     from app.main import app
-    paths = {route.path for route in app.routes}
+    paths = {getattr(route, "path", None) for route in app.routes}
     assert "/api/v1/pricing/{item_id}" in paths
     assert "/api/v1/pricing/{item_id}/cost" in paths
 
