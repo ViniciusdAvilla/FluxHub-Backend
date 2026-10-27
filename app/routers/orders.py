@@ -137,9 +137,13 @@ def paged_orders(
     days: int | None = Query(default=None, ge=1, le=365),
     status: str | None = Query(default=None, max_length=40),
     search: str | None = Query(default=None, max_length=100),
+    min_amount: float | None = Query(default=None, ge=0),
+    max_amount: float | None = Query(default=None, ge=0),
     user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if min_amount is not None and max_amount is not None and min_amount > max_amount:
+        raise HTTPException(422, "Faixa de valor inválida.")
     source = _matching(_base(user.id, account_id, days), search)
     summary = select(Order.status, func.count(Order.id)).where(
         Order.user_id == user.id)
@@ -153,6 +157,13 @@ def paged_orders(
         summary_ids = _matching(_base(user.id, account_id, days), search).with_only_columns(
             Order.id)
         summary = summary.where(Order.id.in_(summary_ids))
+    if min_amount is not None:
+        source = source.where(Order.total_amount >= min_amount)
+        summary = summary.where(Order.total_amount >= min_amount)
+    if max_amount is not None:
+        source = source.where(Order.total_amount <= max_amount)
+        summary = summary.where(Order.total_amount <= max_amount)
+    # Re-read status counts after applying the amount range.
     counts = {key: amount for key, amount in db.execute(
         summary.group_by(Order.status)).all()}
     if status:
@@ -161,13 +172,14 @@ def paged_orders(
         func.count(Order.id)).order_by(None)) or 0
     rows = db.scalars(source.order_by(
         Order.created_at.desc(), Order.id.desc()).offset(offset).limit(limit)).all()
-    paid_sum = db.scalar(select(func.sum(Order.total_amount)).where(
-        Order.user_id == user.id,
-        Order.status == "paid",
-        *( [Order.mercado_livre_user_id == account_id] if account_id is not None else [] ),
-        *( [Order.created_at >= datetime.now(timezone.utc) - timedelta(days=days)]
-           if days is not None else [] ),
-    )) or 0
+    paid_query = _matching(_base(user.id, account_id, days), search).where(
+        Order.status == "paid")
+    if min_amount is not None:
+        paid_query = paid_query.where(Order.total_amount >= min_amount)
+    if max_amount is not None:
+        paid_query = paid_query.where(Order.total_amount <= max_amount)
+    paid_sum = db.scalar(paid_query.with_only_columns(
+        func.sum(Order.total_amount)).order_by(None)) or 0
     return {
         "orders": _decorate(db, rows), "total": total,
         "status_counts": counts, "limit": limit, "offset": offset,
