@@ -1,9 +1,12 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from app.config.settings import settings
+from sqlalchemy.exc import SQLAlchemyError
+from app.database.order_enrichment_schema import ensure_order_enrichment_schema
 from app.core.api_auth import protect_fastapi
 from app.routers.auth import router as auth_router
 from app.routers.admin import router as admin_router
@@ -26,8 +29,19 @@ from app.routers.dashboard import router as dashboard_router
 from app.routers.pricing import router as pricing_router
 
 
+logger = logging.getLogger(__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Old installations may not have run the additive enrichment migration.
+    # Build only the missing feature tables before the sync worker uses them.
+    try:
+        ensure_order_enrichment_schema()
+    except SQLAlchemyError:
+        logger.exception("order_enrichment_schema_bootstrap_failed")
+        # Keep the existing API and OAuth session online even when DDL is denied.
+        # The manual idempotent migration remains available to an operator.
     task = asyncio.create_task(run_sync_worker()) if settings.sync_worker_enabled else None
     try:
         yield
@@ -88,6 +102,8 @@ app.include_router(
     dashboard_router,
     prefix=settings.api_prefix,
 )
+
+app.include_router(pricing_router, prefix=settings.api_prefix)
 
 # Protege todos os caminhos, inclusive /docs e /openapi.json.
 protect_fastapi(app)
