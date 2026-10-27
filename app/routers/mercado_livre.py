@@ -72,6 +72,15 @@ async def seller_request(db: Session, connection: MercadoLivreConnectionModel,
             "[mercado-livre-data] resource=%s upstream_status=%s",
             category, error.response.status_code,
         )
+        if error.response.status_code == 429:
+            retry_after = error.response.headers.get("Retry-After", "")
+            # Only a small bounded integer is passed back to the caller.
+            if not retry_after.isdecimal() or not 1 <= int(retry_after) <= 300:
+                retry_after = "5"
+            raise HTTPException(
+                429, "Muitas consultas ao Mercado Livre. Aguarde antes de retomar.",
+                headers={"Retry-After": retry_after},
+            ) from None
     except MercadoLivreOAuthError as error:
         logger.warning(
             "[mercado-livre-data] resource=%s oauth_phase=%s upstream_status=%s provider_error=%s",
