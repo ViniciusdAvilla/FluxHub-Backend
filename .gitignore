@@ -14,3 +14,9 @@ __pycache__/
 *.db-shm
 *.sqlite-wal
 *.sqlite-shm
+
+# Backend does not vendor JavaScript dependencies or runtime artifacts.
+node_modules/
+.pnpm-store/
+.pytest_cache/
+*.log

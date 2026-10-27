@@ -1,7 +1,6 @@
 """Validação de importação XLSX para o endpoint de produtos por empresa."""
 from io import BytesIO
 
-import pandas as pd
 from pydantic import ValidationError
 
 from app.schemas.product import Product
@@ -27,6 +26,8 @@ def parse_product_workbook(content: bytes) -> list[Product]:
         raise ExcelImportError("O arquivo deve ser XLSX e ter no máximo 15 MB.")
 
     try:
+        # Import only when Excel is used; ordinary API startup avoids pandas.
+        import pandas as pd
         data = pd.read_excel(BytesIO(content), sheet_name=SHEET_NAME, engine="openpyxl")
     except Exception as exc:
         raise ExcelImportError(
