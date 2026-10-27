@@ -3,7 +3,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
 from app.database.models import (
@@ -395,6 +395,27 @@ def ads_performance(user: UserModel = Depends(get_current_user),
             "visits_30d": None, "visits_data_available": False,
             "low_relevance_listings": None,
             "note": "Visitas e vendas atribuídas não são inferidas sem relatório real."}
+
+
+@router.get("/order-status")
+def order_status_summary(
+    days: int = Query(default=30, ge=1, le=365),
+    account_id: int | None = Query(default=None, ge=1),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Counts across every persisted order, not just the first UI page."""
+    if account_id is not None:
+        get_account(db, user.id, account_id)
+    filters = [Order.user_id == user.id,
+               Order.created_at >= now() - timedelta(days=days)]
+    if account_id is not None:
+        filters.append(Order.mercado_livre_user_id == account_id)
+    rows = db.execute(select(Order.status, func.count(Order.id))
+                      .where(*filters).group_by(Order.status)).all()
+    return {"days": days, "account_id": account_id,
+            "total_orders": sum(count for _, count in rows),
+            "by_status": {status or "unknown": count for status, count in rows}}
 
 
 @router.get("/cancellations")
