@@ -226,10 +226,10 @@ async def sync(account_id: int | None = None,
     saved_products = 0
     for item in details:
         if int(item.get("seller_id") or 0) != seller_id:
-            continue
+            raise HTTPException(502, "Vendedor divergente nos detalhes do anúncio.")
         item_id = str(item.get("id") or "")
         if not item_id:
-            continue
+            raise HTTPException(502, "Anúncio sem identificador.")
         title = str(item.get("title") or "")[:255]
         listing = listings_by_id.get(item_id)
         if listing is None:
@@ -313,10 +313,10 @@ async def sync(account_id: int | None = None,
         saved_orders = 0
         for item in orders_page.get("results", []):
             if not isinstance(item, dict) or not item.get("id"):
-                continue
+                raise HTTPException(502, "Pedido sem identificador.")
             seller = item.get("seller") or {}
             if int(seller.get("id") or 0) != seller_id:
-                continue
+                raise HTTPException(502, "Vendedor divergente nos pedidos.")
             external_id = str(item["id"])
             row = orders_by_id.get(external_id)
             if row is None:
