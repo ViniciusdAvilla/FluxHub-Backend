@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 from sqlalchemy import or_, select
 
-from app.database.models import MercadoLivreSyncJobModel as Job, UserModel
+from app.database.models import (CompanyDataSourceModel, MercadoLivreSyncJobModel as Job, UserModel)
 from app.database.session import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ LEASE_SECONDS = 600
 # /orders/search is time-sliced so large stores do not rely on a deep offset.
 ORDERS_WINDOW_SECONDS = 30 * 24 * 60 * 60
 ORDERS_MAX_PAGE_WINDOW = 9000
-MAX_RETRIES = 8
+MAX_RETRIES = 15
 SCROLL_MAX_AGE = timedelta(minutes=4)
 
 
@@ -163,6 +163,15 @@ async def process_one_sync_batch() -> bool:
                         job.phase = "done"
                         job.status = "completed"
                         job.completed_at = utcnow()
+                        source = db.scalar(select(CompanyDataSourceModel).where(
+                            CompanyDataSourceModel.company_id == job.user_id,
+                            CompanyDataSourceModel.provider == "mercado_livre",
+                            CompanyDataSourceModel.account_key == f"ml:{job.mercado_livre_user_id}"))
+                        if source:
+                            source.last_synced_at = job.completed_at
+                            source.status_message = (
+                                f"Sincronização concluída: {job.listings_saved} anúncios e "
+                                f"{job.orders_saved} pedidos processados em {job.pages_done} lotes.")
                     else:
                         job.orders_window_end = min(
                             job.orders_window_start + timedelta(seconds=job.orders_span_seconds),
@@ -184,16 +193,16 @@ async def process_one_sync_batch() -> bool:
             # Never persist upstream bodies, tokens, URLs or cursor values in logs.
             logger.warning("ml_sync_batch_failed job_id=%s phase=%s http_status=%s attempts=%s",
                            job_id, job.phase, status, job.retry_count)
-            if status in (401, 403, 404, 422) or job.retry_count >= MAX_RETRIES:
+            if status in (401, 403, 404, 422) or (status != 429 and job.retry_count >= MAX_RETRIES):
                 job.status = "failed"
                 job.last_error = "Sincronização interrompida; confira a conexão e tente novamente."
             else:
                 job.status = "retry"
-                delay = min(120, 2 ** min(job.retry_count, 6)) + random.uniform(0, 1)
+                delay = min(300, 2 ** min(job.retry_count, 8)) + random.uniform(0, 1)
                 if status == 429 and isinstance(exc, HTTPException):
                     retry_header = (exc.headers or {}).get("Retry-After", "")
                     if retry_header.isdecimal():
-                        delay = max(delay, min(120, int(retry_header)))
+                        delay = max(delay, min(3600, int(retry_header)))
                 job.retry_at = utcnow() + timedelta(seconds=delay)
                 job.last_error = (
                     "Limite temporário de requisições (429); retomada automática."
