@@ -215,8 +215,13 @@ async def process_one_sync_batch() -> bool:
                     "Limite temporário de requisições (429); retomada automática."
                     if status == 429 else "Falha temporária na API; nova tentativa agendada."
                 )
-                # Ambiguous 5xx may have advanced scan state. Replay safely.
-                if job.phase == "listings":
+                # Only a 429 from the scan request itself proves no page was
+                # consumed. A bulk-details 429 may occur after advancing it.
+                safe_scroll_retry = (
+                    status == 429 and isinstance(exc, HTTPException)
+                    and (exc.headers or {}).get("X-FluxHub-Safe-Retry") == "true"
+                )
+                if job.phase == "listings" and not safe_scroll_retry:
                     job.scroll_id = None
                     job.scroll_updated_at = None
                     job.listings_scanned = 0
