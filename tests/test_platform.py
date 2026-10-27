@@ -824,3 +824,39 @@ def test_revenue_uses_paid_orders_not_listing_prices(client):
     complete = c.get("/api/v1/sales/?days=30", headers=headers)
     assert complete.json()["data_complete"] is True
     assert complete.json()["gross_paid_order_amount"] == 120.0
+
+
+
+def test_sales_works_before_additive_sync_job_columns_are_migrated(client):
+    """Revenue must stay readable even if the background worker migration is pending."""
+    from datetime import datetime, timezone
+    from app.database.models import (
+        MercadoLivreSyncJobModel, MercadoLivreOrderSnapshotModel,
+    )
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    user_id = _connected_ml_account(Session)
+    with Session() as db:
+        db.add(MercadoLivreSyncJobModel(
+            user_id=user_id, mercado_livre_user_id=34567,
+            phase="done", status="completed",
+        ))
+        db.add(MercadoLivreOrderSnapshotModel(
+            user_id=user_id, mercado_livre_user_id=34567,
+            external_id="paid-regression", status="paid",
+            total_amount=55.50, is_cancelled=False,
+            created_at=datetime.now(timezone.utc),
+        ))
+        db.commit()
+        # Reproduce a real VPS deployment where the new columns are absent.
+        db.execute(text(
+            "ALTER TABLE mercado_livre_sync_jobs DROP COLUMN pending_listing_ids"
+        ))
+        db.execute(text(
+            "ALTER TABLE mercado_livre_sync_jobs DROP COLUMN pending_next_scroll_id"
+        ))
+        db.commit()
+    response = c.get("/api/v1/sales/?days=30&account_id=34567", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["gross_paid_order_amount"] == 55.50
+    assert response.json()["data_complete"] is True
