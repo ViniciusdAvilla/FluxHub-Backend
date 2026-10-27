@@ -2,7 +2,11 @@
 
 ## Implantação na VPS Hostinger
 
-**Migração aditiva** (não apaga pedidos, produtos, contas OAuth ou sync jobs):
+**Migração aditiva** (não apaga pedidos, produtos, contas OAuth ou sync jobs).
+A partir desta correção, o backend também verifica e cria automaticamente as
+quatro tabelas ausentes na inicialização, antes do worker de sincronização.
+Em instâncias antigas, pode executar manualmente sem reiniciar para corrigir
+uma resposta 500 causada pela ausência das tabelas:
 
     cd /var/www/fluxhub/backend
     .venv/bin/python -m scripts.migrate_order_enrichment
@@ -13,8 +17,15 @@ Esta etapa cria:
 - mercado_livre_buyer_orders: apenas ID do comprador por pedido (sem CPF/e-mail/endereço).
 - mercado_livre_buyer_access_audit: auditoria de consulta sem salvar dados pessoais.
 
-Verifique a migração **antes** de atualizar/reiniciar o backend. Caso o banco de
-produção tenha outra URL, valide DATABASE_URL do serviço sem publicar a senha.
+A verificação é idempotente (segura se executada mais de uma vez) e, em
+PostgreSQL, usa bloqueio transacional para evitar criação concorrente.
+Se o usuário do banco não tiver permissão para criar tabelas, a inicialização
+registra `order_enrichment_schema_bootstrap_failed` no journal; o serviço
+permanece online, e o operador deve executar a migração com uma conta
+autorizada. Não refaça a conexão Mercado Livre nem apague registros.
+
+Se o banco de produção tiver outra URL, valide DATABASE_URL do serviço sem
+publicar a senha.
 
 Após realizar o deploy do backend e do frontend pelas rotinas já usadas na VPS:
 1. Vá até Integrações e inicie a atualização de **pedidos**. O fluxo antigo de
