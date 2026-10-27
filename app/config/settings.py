@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     environment: str = "development"
     database_url: str = ""
+    # Disable in API workers when running a dedicated standalone sync service.
+    sync_worker_enabled: bool = True
     jwt_secret_key: SecretStr | None = None
     mercado_livre_client_id: SecretStr | None = None
     mercado_livre_client_secret: SecretStr | None = None

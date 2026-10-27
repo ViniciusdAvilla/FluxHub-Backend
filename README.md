@@ -33,7 +33,8 @@ Install dependencies and apply the database migration:
 
 ```powershell
 pip install -r requirements.txt
-alembic upgrade head
+python -m scripts.migrate_platform
+python -m scripts.migrate_sync_jobs
 ```
 
 Create each FluxHub user from the VPS or an administrative environment:
@@ -46,8 +47,8 @@ Start the API with `uvicorn app.main:app`. The Next.js application proxies
 `POST /api/v1/auth/login` and stores the resulting JWT in an HttpOnly cookie;
 the browser does not receive the Mercado Livre app secret or a bearer token.
 OAuth tokens are encrypted before storage and seller accounts remain linked to
-their company. Use Alembic (`alembic upgrade head`) for schema changes; do not
-run `create_all` first on a new deployment.
+their company. This branch provides additive migration scripts; review and back up
+the database before running them. A versioned migration system is recommended for future upgrades.
 
 The authenticated company-source endpoints are:
 
@@ -197,3 +198,63 @@ A primeira deve retornar 401, as outras 200 quando o banco e a API estiverem dis
 pip install -r requirements.txt
 pytest tests/test_api_auth.py -q
 ```
+
+
+## Sincronização integral do Mercado Livre (jobs persistidos)
+
+Não há mais teto artificial de 3.000 anúncios no PostgreSQL. A API grava
+anúncios/produtos encontrados pelo scan/scroll em lotes pequenos; os pedidos
+são consultados em janelas de data, com paginação interna e janelas menores
+quando a contagem se aproxima de 9.000 resultados. As operações usam upsert
+e não apagam registros anteriores. Erros temporários/429 têm espera e retomada;
+a continuidade não depende de uma aba do navegador aberta.
+
+**Antes do primeiro deploy** faça backup do PostgreSQL e rode a migração
+aditiva no ambiente virtual e diretório do backend (com DATABASE_URL válida):
+
+```bash
+python -m scripts.migrate_sync_jobs
+```
+
+A migração cria apenas `mercado_livre_sync_jobs` e não remove anúncios,
+pedidos ou tabelas existentes. Faça o deploy **do backend primeiro**; só então
+publique o frontend, que chama as novas rotas:
+
+- `POST /api/v1/analytics/sync-jobs?account_id=123` cria/retoma uma execução
+  autenticada para uma conta da empresa, retornando HTTP 202.
+- `GET /api/v1/analytics/sync-jobs/123` informa fase, status, anúncios
+  consultados/salvos, pedidos, páginas, retentativas e datas.
+- `GET /api/v1/analytics/order-status?days=30&account_id=123` agrupa os pedidos
+  da empresa usando **todo** o banco, não só os 100 mais recentes.
+- `GET /api/v1/orders/?days=30&limit=100&offset=0` serve páginas de pedidos.
+
+`SYNC_WORKER_ENABLED=true` é o padrão no processo da API; ele varre a fila
+de jobs a partir de seu próprio loop async. Uma instalação com muitos
+processos pode mantê-lo habilitado: leases no PostgreSQL e
+`FOR UPDATE SKIP LOCKED` evitam que o mesmo job seja assumido duas vezes.
+Após uma queda, o lease expira em até 10 minutos e o job é reprocessado
+seguramente por identificador. Para suspender o processamento sem alterar os
+dados, configure `SYNC_WORKER_ENABLED=false` e reinicie o serviço.
+
+### Diagnóstico na VPS
+
+```bash
+sudo journalctl -u fluxhub-backend -n 100 --no-pager
+```
+
+No `psql`, conectado à mesma base que consta em `DATABASE_URL`:
+
+```sql
+SELECT user_id, mercado_livre_user_id, status, phase,
+       listings_scanned, listings_saved, orders_saved, pages_done,
+       retry_count, retry_at, updated_at, completed_at
+FROM mercado_livre_sync_jobs
+ORDER BY updated_at DESC;
+```
+
+`completed` significa que foram percorridos os anúncios e pedidos
+**disponíveis para o aplicativo e vendedor na API**. A própria documentação
+Mercado Livre estabelece disponibilidade de pedidos de até 12 meses e
+limites de requisição. Informações sem permissão/endpoint autorizado
+(ex.: relatórios Product Ads, informações financeiras Mercado Pago) não são
+inventadas nem marcadas como sincronizadas pela rotina.
