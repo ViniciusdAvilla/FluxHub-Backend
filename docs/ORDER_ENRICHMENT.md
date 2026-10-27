@@ -11,6 +11,7 @@ Esta etapa cria:
 - mercado_livre_order_lines: produtos, quantidades e comissão dos pedidos;
 - mercado_livre_listing_photos: miniatura pública do anúncio por empresa/conta;
 - mercado_livre_buyer_orders: apenas ID do comprador por pedido (sem CPF/e-mail/endereço).
+- mercado_livre_buyer_access_audit: auditoria de consulta sem salvar dados pessoais.
 
 Verifique a migração **antes** de atualizar/reiniciar o backend. Caso o banco de
 produção tenha outra URL, valide DATABASE_URL do serviço sem publicar a senha.

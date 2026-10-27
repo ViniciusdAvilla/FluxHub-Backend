@@ -15,6 +15,7 @@ def main() -> None:
         "mercado_livre_listing_photos",
         "mercado_livre_order_lines",
         "mercado_livre_buyer_orders",
+        "mercado_livre_buyer_access_audit",
     ):
         Base.metadata.tables[name].create(bind=engine, checkfirst=True)
         print(f"{name}: pronta (dados anteriores preservados).")

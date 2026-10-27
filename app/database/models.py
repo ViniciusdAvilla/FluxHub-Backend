@@ -269,6 +269,19 @@ class MercadoLivreBuyerOrderModel(Base):
     buyer_id: Mapped[int] = mapped_column(BigInteger, index=True)
 
 
+class MercadoLivreBuyerAccessAuditModel(Base):
+    """PII access event without storing the PII itself."""
+    __tablename__ = "mercado_livre_buyer_access_audit"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("fluxhub_users.id", ondelete="CASCADE"), index=True)
+    mercado_livre_user_id: Mapped[int] = mapped_column(Integer, index=True)
+    order_external_id: Mapped[str] = mapped_column(String(100), index=True)
+    accessed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        index=True)
+
+
 class MercadoLivreOrderSnapshotModel(Base):
     __tablename__ = "mercado_livre_order_snapshots"
     __table_args__ = (

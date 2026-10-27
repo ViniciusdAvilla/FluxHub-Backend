@@ -18,6 +18,7 @@ from app.database.models import (
     MercadoLivreListingPhotoModel as ListingPhoto,
     MercadoLivreProductCostModel as Cost,
     MercadoLivreBuyerOrderModel as BuyerOrder,
+    MercadoLivreBuyerAccessAuditModel as BuyerAccessAudit,
 )
 from app.database.session import get_db
 from app.routers.mercado_livre import get_account, seller_request
@@ -349,6 +350,9 @@ async def buyer_detail(
         except HTTPException:
             pass
 
+    db.add(BuyerAccessAudit(user_id=user.id, mercado_livre_user_id=seller_id,
+                            order_external_id=order_id))
+    db.commit()
     return {
         "order_id": order_id, "account_id": seller_id,
         "buyer": buyer, "delivery_address": shipping_address,

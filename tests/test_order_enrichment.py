@@ -3,6 +3,7 @@ from app.database.models import (
     MercadoLivreBuyerOrderModel,
     MercadoLivreOrderLineModel,
     MercadoLivreListingPhotoModel,
+    MercadoLivreBuyerAccessAuditModel,
 )
 from app.routers.analytics import safe_public_thumbnail, thumbnail_from_item
 
@@ -23,6 +24,12 @@ def test_buyer_indexes_store_no_pii():
     assert not names.intersection({
         "email", "phone", "cpf", "document_number", "address", "full_name",
     })
+
+
+def test_audit_retains_no_private_fields():
+    fields = {column.name for column in MercadoLivreBuyerAccessAuditModel.__table__.columns}
+    assert fields == {"id", "user_id", "mercado_livre_user_id",
+                      "order_external_id", "accessed_at"}
 
 
 def test_order_line_and_photo_are_tenant_scoped():
