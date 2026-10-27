@@ -1,5 +1,6 @@
 """Snapshot-based seller analytics. Never fabricate marketplace metrics."""
 from collections import defaultdict
+import logging
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,6 +22,7 @@ from app.database.models import (
 from app.database.session import get_db
 from app.routers.mercado_livre import get_account, seller_request
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 
@@ -254,18 +256,41 @@ async def _sync_batch(
     detail_ids = ids
 
     details = []
-    # /items/bulk accepts at most 20 IDs; large catalogs remain bounded per call.
+    unavailable_items = 0
+    # /items/bulk returns a status PER ITEM. A permanently removed listing
+    # (404/410) must not poison a complete page or block all seller orders.
+    # Transient failures and incomplete responses still retry the staged IDs.
     for start in range(0, len(detail_ids), 20):
         chunk = detail_ids[start:start + 20]
         data = await seller_request(db, account, "/items/bulk", {"ids": ",".join(chunk)})
         if not isinstance(data, list):
             raise HTTPException(502, "Detalhes de anúncios inválidos.")
-        bodies = [row.get("body") for row in data if isinstance(row, dict)
-                  and row.get("status_code", row.get("code")) == 200
-                  and isinstance(row.get("body"), dict)]
-        if len(bodies) != len(chunk) or {str(x.get("id")) for x in bodies} != set(chunk):
+        accounted_for = set()
+        for response_item in data:
+            if not isinstance(response_item, dict):
+                raise HTTPException(502, "Item retornado inválido.")
+            body = response_item.get("body")
+            item_id = str(response_item.get("id") or (
+                body.get("id") if isinstance(body, dict) else "") or "")
+            if item_id not in chunk or item_id in accounted_for:
+                raise HTTPException(502, "Resposta de anúncio incompleta ou duplicada.")
+            accounted_for.add(item_id)
+            code = response_item.get("status_code", response_item.get("code"))
+            if code == 200 and isinstance(body, dict):
+                details.append(body)
+            elif code in (404, 410):
+                unavailable_items += 1
+            elif code in (401, 403, 429):
+                raise HTTPException(code, "Não foi possível consultar anúncios desta conta.")
+            else:
+                raise HTTPException(502, "Falha temporária em item do lote.")
+        if accounted_for != set(chunk):
             raise HTTPException(502, "Lote de anúncios incompleto; página não avançada.")
-        details.extend(bodies)
+    if unavailable_items:
+        logger.warning(
+            "ml_listing_details_unavailable seller=%s count=%s",
+            seller_id, unavailable_items,
+        )
     if not ids:
         next_scroll_id = None
 
@@ -363,8 +388,9 @@ async def _sync_batch(
             if not isinstance(orders_page, dict) or not isinstance(orders_page.get("results"), list):
                 raise HTTPException(502, "Resposta de pedidos inválida.")
         except HTTPException as error:
-            if error.status_code == 429:
-                # Let the client pause and resume at the same order offset.
+            if error.status_code in (401, 403, 429):
+                # Auth failures must be visible, never mislabeled as transient 502.
+                # 429 keeps the same order offset for safe retry.
                 raise
             orders_page = {"results": []}
             orders_unavailable = True
@@ -497,6 +523,7 @@ async def _sync_batch(
         "source": source_key, "listings": len(ids), "saved_listings": imported,
         "listings_total": (page.get("paging") or {}).get("total") if isinstance(page.get("paging"), dict) else None,
         "saved_products": saved_products, "storage_limit": None,
+        "unavailable_listings": unavailable_items,
         "orders": saved_orders, "orders_page_total": orders_page_total,
         "phase": phase, "offset": offset, "limit": limit,
         "next_scroll_id": next_scroll_id if phase == "listings" else None,

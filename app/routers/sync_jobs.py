@@ -2,12 +2,14 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
 from app.database.models import (
-    CompanyDataSourceModel, MercadoLivreSyncJobModel as Job, UserModel,
+    CompanyDataSourceModel, MercadoLivreSyncJobModel as Job,
+    MercadoLivreListingSnapshotModel as Listing,
+    MercadoLivreOrderSnapshotModel as Order, UserModel,
 )
 from app.database.session import get_db
 from app.routers.mercado_livre import get_account
@@ -77,10 +79,15 @@ def start_sync_job(
         job.orders_window_end = None
         job.orders_until = None
         job.orders_span_seconds = 2592000
-        job.listings_scanned = 0
+        # The snapshots survive full refreshes; counters must reflect reality.
+        job.listings_saved = db.scalar(select(func.count(Listing.id)).where(
+            Listing.user_id == user.id,
+            Listing.mercado_livre_user_id == account.mercado_livre_user_id)) or 0
+        job.listings_scanned = job.listings_saved
         job.listings_total = None
-        job.listings_saved = 0
-        job.orders_saved = 0
+        job.orders_saved = db.scalar(select(func.count(Order.id)).where(
+            Order.user_id == user.id,
+            Order.mercado_livre_user_id == account.mercado_livre_user_id)) or 0
         job.pages_done = 0
         job.retry_count = 0
         job.last_error = None
@@ -167,8 +174,8 @@ def start_orders_only_job(
     if job is None:
         job = Job(user_id=user.id, mercado_livre_user_id=account.mercado_livre_user_id)
         db.add(job)
-    elif job.status in ("queued", "running", "retry"):
-        raise HTTPException(409, "Pause a sincronização atual antes de atualizar pedidos.")
+    elif job.status == "running":
+        raise HTTPException(409, "Aguarde o lote atual ou pause antes de atualizar pedidos.")
     job.status = "queued"
     job.phase = "orders"
     job.pending_listing_ids = None
@@ -180,7 +187,9 @@ def start_orders_only_job(
     job.orders_window_end = None
     job.orders_until = None
     job.orders_span_seconds = 2592000
-    job.orders_saved = 0
+    job.orders_saved = db.scalar(select(func.count(Order.id)).where(
+        Order.user_id == user.id,
+        Order.mercado_livre_user_id == account.mercado_livre_user_id)) or 0
     job.pages_done = 0
     job.retry_count = 0
     job.last_error = None

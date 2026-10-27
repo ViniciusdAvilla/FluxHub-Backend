@@ -860,3 +860,109 @@ def test_sales_works_before_additive_sync_job_columns_are_migrated(client):
     assert response.status_code == 200, response.text
     assert response.json()["gross_paid_order_amount"] == 55.50
     assert response.json()["data_complete"] is True
+
+
+def test_complete_catalog_retry_prioritizes_orders_without_deleting_listings(client, monkeypatch):
+    """After an upstream bulk failure, already-complete listings cannot block orders."""
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import func
+    from app.database.models import (
+        MercadoLivreSyncJobModel as Job,
+        MercadoLivreListingSnapshotModel as Listing,
+        MercadoLivreConnectionModel as Connection,
+    )
+    from app.services import ml_sync_worker as worker
+
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    user_id = _connected_ml_account(Session)
+    assert c.post("/api/v1/analytics/sync-jobs", headers=headers,
+                  params={"account_id": 34567}).status_code == 202
+    with Session() as db:
+        db.add(Listing(user_id=user_id, mercado_livre_user_id=34567,
+                       external_id="MLBALREADY", title="Salvo",
+                       status="active", price=100))
+        job = db.scalar(select(Job).where(Job.user_id == user_id))
+        job.status = "retry"
+        job.retry_count = 2
+        job.retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        job.listings_total = 1
+        job.listings_saved = 1
+        job.pending_listing_ids = ["MLBUNAVAILABLE"]
+        job.pending_next_scroll_id = "expired-cursor"
+        db.commit()
+
+    monkeypatch.setattr(worker, "SessionLocal", Session)
+    claimed = worker._claim_job()
+    assert claimed is not None
+    with Session() as db:
+        job = db.get(Job, claimed)
+        assert job.phase == "orders"
+        assert job.status == "running"
+        assert job.listings_saved == 1
+        assert job.pending_listing_ids is None
+        assert job.retry_count == 0
+        assert db.scalar(select(func.count(Listing.id)).where(
+            Listing.user_id == user_id)) == 1
+        assert db.scalar(select(func.count(Connection.id)).where(
+            Connection.user_id == user_id)) == 1
+
+
+def test_orders_only_can_override_waiting_listing_retry(client):
+    """A waiting 502 retry must not hide or block the orders/faturamento action."""
+    from datetime import datetime, timedelta, timezone
+    from app.database.models import MercadoLivreSyncJobModel as Job
+
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    _connected_ml_account(Session)
+    assert c.post("/api/v1/analytics/sync-jobs", headers=headers,
+                  params={"account_id": 34567}).status_code == 202
+    with Session() as db:
+        job = db.scalar(select(Job))
+        job.status = "retry"
+        job.phase = "listings"
+        job.retry_count = 3
+        job.retry_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        job.listings_saved = 11517
+        job.listings_total = 11517
+        db.commit()
+    response = c.post("/api/v1/analytics/sync-jobs/34567/orders", headers=headers)
+    assert response.status_code == 202, response.text
+    assert response.json()["phase"] == "orders"
+    assert response.json()["listings_saved"] == 11517
+    assert response.json()["retry_count"] == 0
+
+
+def test_listing_batch_skips_permanently_unavailable_item_without_losing_page(client, monkeypatch):
+    """One removed item (HTTP 404 in /items/bulk) must not block seller orders."""
+    from sqlalchemy import func
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    user_id = _connected_ml_account(Session)
+    async def fake_request(db, account, path, params=None):
+        if path.endswith("/items/search"):
+            return {"results": ["MLB98765001", "MLB98765002"],
+                    "scroll_id": None, "paging": {"total": 2}}
+        if path == "/items/bulk":
+            return [
+                {"status_code": 200, "body": {
+                    "id": "MLB98765001", "seller_id": 34567, "title": "Ativo",
+                    "status": "active", "price": 19.90, "attributes": []}},
+                {"id": "MLB98765002", "status_code": 404, "body": {"message": "not found"}},
+            ]
+        if path.endswith("/items_visits/time_window"):
+            return {"results": []}
+        raise AssertionError(f"Request unexpectedly made: {path}")
+    monkeypatch.setattr("app.routers.analytics.seller_request", fake_request)
+    response = c.post("/api/v1/analytics/sync", headers=headers,
+                      params={"account_id": 34567, "phase": "listings"})
+    assert response.status_code == 200, response.text
+    assert response.json()["saved_listings"] == 1
+    assert response.json()["unavailable_listings"] == 1
+    assert response.json()["listings_complete"] is True
+    with Session() as db:
+        from app.database.models import MercadoLivreListingSnapshotModel as Listing
+        assert db.scalar(select(func.count(Listing.id)).where(
+            Listing.user_id == user_id,
+            Listing.mercado_livre_user_id == 34567)) == 1
