@@ -72,6 +72,15 @@ async def seller_request(db: Session, connection: MercadoLivreConnectionModel,
             "[mercado-livre-data] resource=%s upstream_status=%s",
             category, error.response.status_code,
         )
+        if error.response.status_code == 429:
+            retry_after = error.response.headers.get("Retry-After", "")
+            # Only a small bounded integer is passed back to the caller.
+            if not retry_after.isdecimal() or not 1 <= int(retry_after) <= 300:
+                retry_after = "5"
+            raise HTTPException(
+                429, "Muitas consultas ao Mercado Livre. Aguarde antes de retomar.",
+                headers={"Retry-After": retry_after},
+            ) from None
     except MercadoLivreOAuthError as error:
         logger.warning(
             "[mercado-livre-data] resource=%s oauth_phase=%s upstream_status=%s provider_error=%s",
@@ -261,6 +270,59 @@ async def items(account_id: int | None = None, limit: int = Query(default=50, ge
     return await seller_request(db, account,
         f"/users/{account.mercado_livre_user_id}/items/search",
         {"limit": limit, "offset": offset})
+
+
+@router.get("/items/live")
+async def live_items(
+    account_id: int = Query(ge=1),
+    scroll_id: str | None = Query(default=None, min_length=1, max_length=4096),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Page through the whole seller catalog without storing the returned items."""
+    account = get_account(db, user.id, account_id)
+    params = {"search_type": "scan", "limit": 50}
+    if scroll_id:
+        params["scroll_id"] = scroll_id
+    page = await seller_request(
+        db, account, f"/users/{account.mercado_livre_user_id}/items/search", params)
+    if not isinstance(page, dict) or not isinstance(page.get("results"), list):
+        raise HTTPException(502, "Lista de anúncios inválida.")
+    ids = page["results"]
+    if len(ids) > 50 or any(not isinstance(item_id, str) or
+                            not item_id.isalnum() for item_id in ids):
+        raise HTTPException(502, "IDs de anúncios inválidos.")
+    cursor = page.get("scroll_id")
+    if cursor is not None and (not isinstance(cursor, str) or not 1 <= len(cursor) <= 4096):
+        raise HTTPException(502, "Cursor de anúncios inválido.")
+    items = []
+    for start in range(0, len(ids), 20):
+        chunk = ids[start:start + 20]
+        data = await seller_request(db, account, "/items/bulk", {"ids": ",".join(chunk)})
+        if not isinstance(data, list):
+            raise HTTPException(502, "Detalhes dos anúncios indisponíveis.")
+        bodies = [row.get("body") for row in data if isinstance(row, dict)
+                  and row.get("status_code", row.get("code")) == 200
+                  and isinstance(row.get("body"), dict)]
+        if len(bodies) != len(chunk) or {str(body.get("id")) for body in bodies} != set(chunk):
+            raise HTTPException(502, "Lote incompleto; tente consultar novamente.")
+        for body in bodies:
+            if int(body.get("seller_id") or 0) != account.mercado_livre_user_id:
+                raise HTTPException(502, "Anúncio de outro vendedor na resposta.")
+            items.append({
+                "id": str(body["id"]), "title": str(body.get("title") or "")[:255],
+                "status": str(body.get("status") or "unknown")[:40],
+                "price": body.get("price"), "stock": body.get("available_quantity"),
+            })
+    paging = page.get("paging")
+    total = paging.get("total") if isinstance(paging, dict) else None
+    return {
+        "account_id": account.mercado_livre_user_id,
+        "items": items,
+        "next_scroll_id": cursor if ids else None,
+        "total": total if type(total) is int and total >= 0 else None,
+        "source": "mercado_livre_live",
+    }
 
 
 @router.get("/items/{item_id}")
