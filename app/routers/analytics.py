@@ -316,7 +316,10 @@ async def sync(account_id: int | None = None,
                 "sort": "date_desc"})
             if not isinstance(orders_page, dict) or not isinstance(orders_page.get("results"), list):
                 raise HTTPException(502, "Resposta de pedidos inválida.")
-        except HTTPException:
+        except HTTPException as error:
+            if error.status_code == 429:
+                # Let the client pause and resume at the same order offset.
+                raise
             orders_page = {"results": []}
             orders_unavailable = True
         if not orders_unavailable:
