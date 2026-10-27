@@ -173,7 +173,16 @@ async def sync(account_id: int | None = None,
     if phase != "orders":
         params = ({"search_type": "scan", **({"scroll_id": scroll_id} if scroll_id else {})}
                   if phase == "listings" else {"limit": limit, "offset": offset})
-        page = await seller_request(db, account, f"/users/{seller_id}/items/search", params)
+        try:
+            page = await seller_request(db, account, f"/users/{seller_id}/items/search", params)
+        except HTTPException as exc:
+            if exc.status_code == 429:
+                # No page was consumed; the worker may reuse its last
+                # confirmed cursor once the upstream Retry-After has passed.
+                raise HTTPException(429, exc.detail, headers={
+                    **(exc.headers or {}), "X-FluxHub-Safe-Retry": "true"
+                }) from exc
+            raise
         if not isinstance(page, dict):
             raise HTTPException(502, "Resposta de anúncios inválida.")
         if phase == "listings":
