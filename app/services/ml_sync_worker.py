@@ -119,8 +119,15 @@ async def process_one_sync_batch() -> bool:
             # process dies in between, the expired lease restarts that phase
             # from the beginning and safe upserts replay the records.
             job = db.get(Job, job_id)
-            if job.phase == "orders" and isinstance(result.get("orders_page_total"), int) and (
-                result["orders_page_total"] >= ORDERS_MAX_PAGE_WINDOW
+            order_total = result.get("orders_page_total")
+            next_order_offset = result.get("next_orders_offset")
+            near_deep_offset = (
+                isinstance(next_order_offset, int) and
+                next_order_offset >= ORDERS_MAX_PAGE_WINDOW
+            )
+            if job.phase == "orders" and (
+                (isinstance(order_total, int) and order_total >= ORDERS_MAX_PAGE_WINDOW)
+                or near_deep_offset
             ):
                 # Rewind this window and halve it before the 10k offset cliff.
                 # Replayed upserts are safe; no orders are silently omitted.
