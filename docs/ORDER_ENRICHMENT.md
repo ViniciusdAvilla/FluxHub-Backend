@@ -72,3 +72,22 @@ do pedido nem a conferência fiscal por profissional habilitado.
 - pedido com diversos itens/variações; pedido cancelado; SKU ausente;
 - pedido anterior à migração, sem foto; API 429/502 e buyer PII ausente;
 - mobile: modal, filtros e tabela; foco/teclado e fechamento do diálogo.
+
+
+## Corrigir erro `UndefinedColumn` na fila sem desconectar vendedores
+
+Em instalações que já tinham `mercado_livre_sync_jobs`, atualizações antigas
+podem deixar ausentes `pending_listing_ids` e
+`pending_next_scroll_id`. A verificação automática no startup repara apenas
+essas duas colunas antes de iniciar o worker. Não altera status, contadores,
+cursores, anúncios, pedidos ou credenciais OAuth.
+
+Correção manual imediata (idempotente):
+
+    cd /var/www/fluxhub/backend
+    .venv/bin/python -m scripts.migrate_sync_jobs
+    sudo systemctl restart fluxhub-backend
+
+Caso a conta do banco não possa executar o ALTER TABLE, a API mantém login e
+conexões online, registra `sync_job_schema_bootstrap_failed` e pausa o worker
+até a estrutura ser corrigida. Consulte `journalctl -u fluxhub-backend`.

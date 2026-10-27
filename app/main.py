@@ -6,7 +6,9 @@ from fastapi import FastAPI
 
 from app.config.settings import settings
 from sqlalchemy.exc import SQLAlchemyError
-from app.database.order_enrichment_schema import ensure_order_enrichment_schema
+from app.database.order_enrichment_schema import (
+    ensure_order_enrichment_schema, ensure_sync_job_schema,
+)
 from app.core.api_auth import protect_fastapi
 from app.routers.auth import router as auth_router
 from app.routers.admin import router as admin_router
@@ -36,13 +38,26 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Old installations may not have run the additive enrichment migration.
     # Build only the missing feature tables before the sync worker uses them.
+    schema_ready = True
     try:
         ensure_order_enrichment_schema()
     except SQLAlchemyError:
+        schema_ready = False
         logger.exception("order_enrichment_schema_bootstrap_failed")
         # Keep the existing API and OAuth session online even when DDL is denied.
         # The manual idempotent migration remains available to an operator.
-    task = asyncio.create_task(run_sync_worker()) if settings.sync_worker_enabled else None
+    try:
+        ensure_sync_job_schema()
+    except SQLAlchemyError:
+        schema_ready = False
+        logger.exception("sync_job_schema_bootstrap_failed")
+    # A missing checkpoint column causes repeated UndefinedColumn errors.
+    # Keep login/OAuth endpoints online, but do not run a broken worker.
+    if settings.sync_worker_enabled and not schema_ready:
+        logger.warning("ml_sync_worker_paused_missing_schema")
+    task = asyncio.create_task(run_sync_worker()) if (
+        settings.sync_worker_enabled and schema_ready
+    ) else None
     try:
         yield
     finally:
