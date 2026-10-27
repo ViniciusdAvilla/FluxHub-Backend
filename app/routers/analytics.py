@@ -383,15 +383,25 @@ async def sync(account_id: int | None = None,
     }
 
 @router.get("/ads-performance")
-def ads_performance(user: UserModel = Depends(get_current_user),
-                    db: Session = Depends(get_db)):
-    rows = db.scalars(select(Listing).where(Listing.user_id == user.id)).all()
-    statuses = defaultdict(int)
-    for row in rows:
-        statuses[row.status] += 1
-    return {"total_listings": len(rows), "by_status": dict(statuses),
+def ads_performance(
+    account_id: int | None = Query(default=None, ge=1),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if account_id is not None:
+        get_account(db, user.id, account_id)
+    filters = [Listing.user_id == user.id]
+    if account_id is not None:
+        filters.append(Listing.mercado_livre_user_id == account_id)
+    # Database aggregation stays bounded as a seller grows beyond 10k items.
+    counts = db.execute(select(Listing.status, func.count(Listing.id))
+                        .where(*filters).group_by(Listing.status)).all()
+    statuses = {status or "unknown": count for status, count in counts}
+    total = sum(statuses.values())
+    avg = db.scalar(select(func.avg(Listing.price)).where(*filters))
+    return {"total_listings": total, "by_status": statuses,
             "active_listings": statuses.get("active", 0),
-            "average_price": round(sum(r.price for r in rows) / len(rows), 2) if rows else None,
+            "average_price": round(float(avg), 2) if avg is not None else None,
             "visits_30d": None, "visits_data_available": False,
             "low_relevance_listings": None,
             "note": "Visitas e vendas atribuídas não são inferidas sem relatório real."}
