@@ -512,3 +512,88 @@ def test_sync_caps_seller_storage_at_3000_but_keeps_scanning(client, monkeypatch
     assert live.status_code == 200, live.text
     assert len(live.json()["items"]) == 2
     assert live.json()["source"] == "mercado_livre_live"
+
+
+
+def test_listing_scan_beyond_10000_preserves_page_on_rate_limit(client, monkeypatch):
+    """A 429 after 10k IDs is retryable at the same cursor, without DB overflow."""
+    from datetime import datetime, timezone
+    from fastapi import HTTPException
+    from sqlalchemy import func
+    from app.core.security import encrypt_token
+    from app.database.models import MercadoLivreConnectionModel, MercadoLivreListingSnapshotModel
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    with Session() as db:
+        user = db.scalar(select(UserModel).where(UserModel.email == "admin@example.com"))
+        db.add(MercadoLivreConnectionModel(
+            user_id=user.id, mercado_livre_user_id=34567,
+            access_token_encrypted=encrypt_token("fake-access"),
+            refresh_token_encrypted=encrypt_token("fake-refresh"),
+            expires_at=datetime.now(timezone.utc),
+        ))
+        db.add(CompanyDataSourceModel(
+            company_id=user.id, provider="mercado_livre", account_key="ml:34567",
+            display_name="Conta teste", enabled=True, connected=True))
+        db.commit()
+        user_id = user.id
+
+    monkeypatch.setattr("app.routers.analytics.MAX_STORED_ML_LISTINGS", 3)
+    item_ids = [f"MLB{70000000 + i}" for i in range(10037)]
+    bulk_ids = []
+    rejected_once = False
+
+    async def fake_seller_request(db, connection, path, params=None):
+        nonlocal rejected_once
+        if path.endswith("/items/search"):
+            page = int(params.get("scroll_id", "0"))
+            if page == 100 and not rejected_once:
+                rejected_once = True
+                raise HTTPException(429, "Muitas consultas", headers={"Retry-After": "1"})
+            start = page * 100
+            end = min(start + 100, len(item_ids))
+            return {
+                "results": item_ids[start:end],
+                "scroll_id": str(page + 1) if end < len(item_ids) else None,
+            }
+        if path == "/items/bulk":
+            ids = params["ids"].split(",")
+            bulk_ids.extend(ids)
+            return [{"status_code": 200, "body": {
+                "id": item_id, "seller_id": 34567, "title": "Teste",
+                "status": "active", "price": 10, "attributes": [],
+            }} for item_id in ids]
+        if path.endswith("/items_visits/time_window"):
+            return {"results": []}
+        raise AssertionError(path)
+
+    monkeypatch.setattr("app.routers.analytics.seller_request", fake_seller_request)
+    cursor = None
+    total_scanned = 0
+    limited = 0
+    for _ in range(104):
+        params = {"phase": "listings", "account_id": 34567}
+        if cursor is not None:
+            params["scroll_id"] = cursor
+        response = c.post("/api/v1/analytics/sync", headers=headers, params=params)
+        if response.status_code == 429:
+            limited += 1
+            assert response.headers["retry-after"] == "1"
+            continue  # same cursor, no page silently lost
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        total_scanned += payload["listings"]
+        cursor = payload["next_scroll_id"]
+        if cursor is None:
+            break
+    assert limited == 1
+    assert total_scanned == len(item_ids)
+    assert len(bulk_ids) == 3
+    with Session() as db:
+        assert db.scalar(select(func.count()).select_from(ProductModel).where(
+            ProductModel.company_id == user_id,
+            ProductModel.source_key == "ml:34567")) == 3
+        assert db.scalar(select(func.count()).select_from(
+            MercadoLivreListingSnapshotModel).where(
+                MercadoLivreListingSnapshotModel.user_id == user_id,
+                MercadoLivreListingSnapshotModel.mercado_livre_user_id == 34567)) == 3
