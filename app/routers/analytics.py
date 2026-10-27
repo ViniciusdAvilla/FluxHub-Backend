@@ -3,7 +3,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
 from app.database.models import (
@@ -16,8 +16,6 @@ from app.database.models import (
 )
 from app.database.session import get_db
 from app.routers.mercado_livre import get_account, seller_request
-
-MAX_STORED_ML_LISTINGS = 3_000  # per authenticated user and connected seller account
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
@@ -142,7 +140,9 @@ async def sync(account_id: int | None = None,
                phase: str = Query(default="legacy", pattern="^(legacy|listings|orders)$"),
                scroll_id: str | None = Query(default=None, min_length=1, max_length=4096),
                user: UserModel = Depends(get_current_user),
-               db: Session = Depends(get_db)):
+               db: Session = Depends(get_db),
+               orders_created_from: datetime | None = None,
+               orders_created_to: datetime | None = None):
     """Persist one bounded batch. Scan+scroll retrieves listings beyond the 1000-offset cap.
 
     Each page is an independent transaction; repeating a page is safe because
@@ -161,6 +161,10 @@ async def sync(account_id: int | None = None,
         raise HTTPException(409, "Fonte Mercado Livre não conectada.")
     if phase == "legacy" and offset > 1000:
         raise HTTPException(422, "Use phase=listings com paginação scan para mais de 1.000 anúncios.")
+    if (orders_created_from is not None or orders_created_to is not None) and phase != "orders":
+        raise HTTPException(422, "Período de pedidos só é válido para phase=orders.")
+    if orders_created_from and orders_created_to and orders_created_from >= orders_created_to:
+        raise HTTPException(422, "Período de pedidos inválido.")
     if scroll_id and phase != "listings":
         raise HTTPException(422, "scroll_id só é aceito para anúncios no modo scan.")
 
@@ -184,39 +188,11 @@ async def sync(account_id: int | None = None,
     # Never silently skip malformed IDs or a partial bulk response; retry the page.
     if len(ids) > (100 if phase == "listings" else limit) or any(not isinstance(item, str) or not item.isalnum() for item in ids):
         raise HTTPException(502, "Lista de anúncios contém IDs inválidos.")
-    # Only request item details for rows that can actually be persisted.
-    # After reaching the storage limit, scroll still advances across every ID.
-    existing_listing_ids = {row[0] for row in db.execute(
-        select(Listing.external_id).where(
-            Listing.user_id == user.id,
-            Listing.mercado_livre_user_id == seller_id,
-            Listing.external_id.in_(ids))).all()}
-    existing_product_ids = {row[0] for row in db.execute(
-        select(ProductModel.external_id).where(
-            ProductModel.company_id == user.id,
-            ProductModel.source_key == source_key,
-            ProductModel.external_id.in_(ids))).all()}
-    available_listings = max(0, MAX_STORED_ML_LISTINGS - (db.scalar(
-        select(func.count()).select_from(Listing).where(
-            Listing.user_id == user.id,
-            Listing.mercado_livre_user_id == seller_id)) or 0))
-    available_products = max(0, MAX_STORED_ML_LISTINGS - (db.scalar(
-        select(func.count()).select_from(ProductModel).where(
-            ProductModel.company_id == user.id,
-            ProductModel.source_key == source_key)) or 0))
-    detail_ids = []
-    for item_id in ids:
-        has_listing = item_id in existing_listing_ids
-        has_product = item_id in existing_product_ids
-        if has_listing or has_product or available_listings or available_products:
-            detail_ids.append(item_id)
-            if not has_listing and available_listings:
-                available_listings -= 1
-            if not has_product and available_products:
-                available_products -= 1
+    # Persist every seller item. Pagination and rate limits are handled per batch.
+    detail_ids = ids
 
     details = []
-    # /items/bulk accepts at most 20 IDs; never fetch details we cannot store.
+    # /items/bulk accepts at most 20 IDs; large catalogs remain bounded per call.
     for start in range(0, len(detail_ids), 20):
         chunk = detail_ids[start:start + 20]
         data = await seller_request(db, account, "/items/bulk", {"ids": ",".join(chunk)})
@@ -231,8 +207,7 @@ async def sync(account_id: int | None = None,
     if not ids:
         next_scroll_id = None
 
-    # Serialize persistence per seller, then recount under the database lock.
-    # Parallel browser tabs must not insert more than the permitted number.
+    # Serialize upserts by seller to avoid duplicate records across concurrent jobs.
     db.scalar(select(CompanyDataSourceModel.id).where(
         CompanyDataSourceModel.company_id == user.id,
         CompanyDataSourceModel.provider == "mercado_livre",
@@ -247,12 +222,6 @@ async def sync(account_id: int | None = None,
             ProductModel.company_id == user.id,
             ProductModel.source_key == source_key,
             ProductModel.external_id.in_(detail_ids))).all()}
-    listing_count = db.scalar(select(func.count()).select_from(Listing).where(
-        Listing.user_id == user.id,
-        Listing.mercado_livre_user_id == seller_id)) or 0
-    product_count = db.scalar(select(func.count()).select_from(ProductModel).where(
-        ProductModel.company_id == user.id,
-        ProductModel.source_key == source_key)) or 0
     imported = 0
     saved_products = 0
     for item in details:
@@ -263,12 +232,11 @@ async def sync(account_id: int | None = None,
             continue
         title = str(item.get("title") or "")[:255]
         listing = listings_by_id.get(item_id)
-        if listing is None and listing_count < MAX_STORED_ML_LISTINGS:
+        if listing is None:
             listing = Listing(user_id=user.id, mercado_livre_user_id=seller_id,
                               external_id=item_id)
             db.add(listing)
             listings_by_id[item_id] = listing
-            listing_count += 1
         if listing is not None:
             listing.title = title
             listing.category_id = item.get("category_id")
@@ -281,12 +249,11 @@ async def sync(account_id: int | None = None,
             imported += 1
 
         product = products_by_id.get(item_id)
-        if product is None and product_count < MAX_STORED_ML_LISTINGS:
+        if product is None:
             product = ProductModel(company_id=user.id, source_key=source_key,
                                    external_id=item_id, category="", brand="")
             db.add(product)
             products_by_id[item_id] = product
-            product_count += 1
         if product is not None:
             product.title = title
             product.category = str(item.get("category_id") or "Sem categoria")
@@ -309,11 +276,16 @@ async def sync(account_id: int | None = None,
     orders_unavailable = False
     saved_orders = 0
     next_orders_offset = None
+    orders_page_total = None
     if phase != "listings":
         try:
-            orders_page = await seller_request(db, account, "/orders/search", {
-                "seller": seller_id, "limit": limit, "offset": offset,
-                "sort": "date_desc"})
+            order_params = {"seller": seller_id, "limit": limit, "offset": offset,
+                            "sort": "date_desc"}
+            if orders_created_from:
+                order_params["order.date_created.from"] = orders_created_from.isoformat()
+            if orders_created_to:
+                order_params["order.date_created.to"] = orders_created_to.isoformat()
+            orders_page = await seller_request(db, account, "/orders/search", order_params)
             if not isinstance(orders_page, dict) or not isinstance(orders_page.get("results"), list):
                 raise HTTPException(502, "Resposta de pedidos inválida.")
         except HTTPException as error:
@@ -328,6 +300,7 @@ async def sync(account_id: int | None = None,
                 raise HTTPException(502, "Página de pedidos maior do que o solicitado.")
             paging = orders_page.get("paging") or {}
             total = paging.get("total") if isinstance(paging, dict) else None
+            orders_page_total = total if isinstance(total, int) else None
             if len(order_results) == limit and (not isinstance(total, int) or offset + len(order_results) < total):
                 next_orders_offset = offset + len(order_results)
         order_ids = [str(item["id"]) for item in orders_page.get("results", [])
@@ -395,8 +368,9 @@ async def sync(account_id: int | None = None,
     db.commit()
     return {
         "source": source_key, "listings": len(ids), "saved_listings": imported,
-        "saved_products": saved_products, "storage_limit": MAX_STORED_ML_LISTINGS,
-        "orders": saved_orders,
+        "listings_total": (page.get("paging") or {}).get("total") if isinstance(page.get("paging"), dict) else None,
+        "saved_products": saved_products, "storage_limit": None,
+        "orders": saved_orders, "orders_page_total": orders_page_total,
         "phase": phase, "offset": offset, "limit": limit,
         "next_scroll_id": next_scroll_id if phase == "listings" else None,
         "next_orders_offset": next_orders_offset,
