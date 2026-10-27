@@ -340,3 +340,46 @@ class SupportReplyAuditModel(Base):
     provider_message_id: Mapped[str] = mapped_column(String(100), default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class MercadoLivreSyncJobModel(Base):
+    """Durable background import checkpoint; one job per FluxHub user/seller."""
+
+    __tablename__ = "mercado_livre_sync_jobs"
+    __table_args__ = (
+        UniqueConstraint("user_id", "mercado_livre_user_id",
+                         name="uq_ml_sync_job_user_seller"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("fluxhub_users.id", ondelete="CASCADE"), index=True)
+    mercado_livre_user_id: Mapped[int] = mapped_column(Integer, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    phase: Mapped[str] = mapped_column(String(20), default="listings")
+    scroll_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scroll_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    orders_offset: Mapped[int] = mapped_column(Integer, default=0)
+    orders_window_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    orders_window_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    orders_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    orders_span_seconds: Mapped[int] = mapped_column(Integer, default=2592000)
+    listings_scanned: Mapped[int] = mapped_column(Integer, default=0)
+    listings_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    listings_saved: Mapped[int] = mapped_column(Integer, default=0)
+    orders_saved: Mapped[int] = mapped_column(Integer, default=0)
+    pages_done: Mapped[int] = mapped_column(Integer, default=0)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc))
