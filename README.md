@@ -33,7 +33,8 @@ Install dependencies and apply the database migration:
 
 ```powershell
 pip install -r requirements.txt
-alembic upgrade head
+python -m scripts.migrate_platform
+python -m scripts.migrate_sync_jobs
 ```
 
 Create each FluxHub user from the VPS or an administrative environment:
@@ -46,8 +47,8 @@ Start the API with `uvicorn app.main:app`. The Next.js application proxies
 `POST /api/v1/auth/login` and stores the resulting JWT in an HttpOnly cookie;
 the browser does not receive the Mercado Livre app secret or a bearer token.
 OAuth tokens are encrypted before storage and seller accounts remain linked to
-their company. Use Alembic (`alembic upgrade head`) for schema changes; do not
-run `create_all` first on a new deployment.
+their company. This branch provides additive migration scripts; review and back up
+the database before running them. A versioned migration system is recommended for future upgrades.
 
 The authenticated company-source endpoints are:
 
