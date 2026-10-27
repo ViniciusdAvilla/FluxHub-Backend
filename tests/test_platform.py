@@ -22,6 +22,7 @@ def client(monkeypatch):
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(settings, "backend_token", "s" * 48)
+    monkeypatch.setattr(settings, "sync_worker_enabled", False)
     monkeypatch.setattr(settings, "jwt_secret_key", SecretStr("j" * 48))
     monkeypatch.setattr(settings, "token_encryption_key", SecretStr(Fernet.generate_key().decode()))
     monkeypatch.setattr(settings, "mercado_livre_client_id", SecretStr("123456"))
@@ -422,8 +423,8 @@ def test_sync_scans_more_than_1000_items_and_paginates_orders_separately(client,
 
 
 
-def test_sync_caps_seller_storage_at_3000_but_keeps_scanning(client, monkeypatch):
-    """More than 3000 seller IDs are scanned; excess details are not persisted."""
+def test_sync_persists_every_listing_beyond_3000(client, monkeypatch):
+    """More than 3000 seller IDs are scanned and every valid item is persisted."""
     c, Session = client
     headers = login(c, "admin@example.com", "AdminPassw0rd!")
     from datetime import datetime, timezone
@@ -485,26 +486,26 @@ def test_sync_caps_seller_storage_at_3000_but_keeps_scanning(client, monkeypatch
     })
     assert first.status_code == 200, first.text
     assert first.json()["listings"] == 2
-    assert first.json()["saved_listings"] == 1
-    assert first.json()["storage_limit"] == 3000
+    assert first.json()["saved_listings"] == 2
+    assert first.json()["storage_limit"] is None
     assert first.json()["next_scroll_id"] == "second-page"
     second = c.post("/api/v1/analytics/sync", headers=headers, params={
         "phase": "listings", "account_id": 34567, "scroll_id": "second-page",
     })
     assert second.status_code == 200, second.text
     assert second.json()["listings"] == 2
-    assert second.json()["saved_listings"] == 0
+    assert second.json()["saved_listings"] == 2
     assert second.json()["next_scroll_id"] is None
-    assert bulk_ids == ["MLB2999"]  # no excess bulk/detail requests
+    assert bulk_ids == ["MLB2999", "MLB3000", "MLB3001", "MLB3002"]
 
     with Session() as db:
         assert db.scalar(select(func.count()).select_from(ProductModel).where(
             ProductModel.company_id == user_id,
-            ProductModel.source_key == "ml:34567")) == 3000
+            ProductModel.source_key == "ml:34567")) == 3003
         assert db.scalar(select(func.count()).select_from(
             MercadoLivreListingSnapshotModel).where(
                 MercadoLivreListingSnapshotModel.user_id == user_id,
-                MercadoLivreListingSnapshotModel.mercado_livre_user_id == 34567)) == 3000
+                MercadoLivreListingSnapshotModel.mercado_livre_user_id == 34567)) == 3003
 
     monkeypatch.setattr("app.routers.mercado_livre.seller_request", fake_request)
     live = c.get("/api/v1/connectors/mercado-livre/items/live",
@@ -516,7 +517,7 @@ def test_sync_caps_seller_storage_at_3000_but_keeps_scanning(client, monkeypatch
 
 
 def test_listing_scan_beyond_10000_preserves_page_on_rate_limit(client, monkeypatch):
-    """A 429 after 10k IDs is retryable at the same cursor, without DB overflow."""
+    """A 429 after 10k IDs is retryable without losing or capping data."""
     from datetime import datetime, timezone
     from fastapi import HTTPException
     from sqlalchemy import func
@@ -538,7 +539,6 @@ def test_listing_scan_beyond_10000_preserves_page_on_rate_limit(client, monkeypa
         db.commit()
         user_id = user.id
 
-    monkeypatch.setattr("app.routers.analytics.MAX_STORED_ML_LISTINGS", 3)
     item_ids = [f"MLB{70000000 + i}" for i in range(10037)]
     bulk_ids = []
     rejected_once = False
@@ -588,12 +588,84 @@ def test_listing_scan_beyond_10000_preserves_page_on_rate_limit(client, monkeypa
             break
     assert limited == 1
     assert total_scanned == len(item_ids)
-    assert len(bulk_ids) == 3
+    assert len(bulk_ids) == len(item_ids)
     with Session() as db:
         assert db.scalar(select(func.count()).select_from(ProductModel).where(
             ProductModel.company_id == user_id,
-            ProductModel.source_key == "ml:34567")) == 3
+            ProductModel.source_key == "ml:34567")) == len(item_ids)
         assert db.scalar(select(func.count()).select_from(
             MercadoLivreListingSnapshotModel).where(
                 MercadoLivreListingSnapshotModel.user_id == user_id,
-                MercadoLivreListingSnapshotModel.mercado_livre_user_id == 34567)) == 3
+                MercadoLivreListingSnapshotModel.mercado_livre_user_id == 34567)) == len(item_ids)
+
+
+def test_background_job_runs_after_browser_request_and_records_progress(client, monkeypatch):
+    """Durable job checkpoints advance from scan into partitioned orders."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from app.core.security import encrypt_token
+    from app.database.models import (
+        MercadoLivreConnectionModel, MercadoLivreSyncJobModel,
+        MercadoLivreListingSnapshotModel, MercadoLivreOrderSnapshotModel,
+    )
+    from app.services import ml_sync_worker as worker
+
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    with Session() as db:
+        user = db.scalar(select(UserModel).where(UserModel.email == "admin@example.com"))
+        db.add(MercadoLivreConnectionModel(
+            user_id=user.id, mercado_livre_user_id=34567,
+            access_token_encrypted=encrypt_token("fake-access"),
+            refresh_token_encrypted=encrypt_token("fake-refresh"),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        ))
+        db.add(CompanyDataSourceModel(company_id=user.id, provider="mercado_livre",
+            account_key="ml:34567", display_name="Conta de teste", enabled=True, connected=True))
+        db.commit()
+        user_id = user.id
+
+    created = c.post("/api/v1/analytics/sync-jobs", headers=headers,
+                     params={"account_id": 34567})
+    assert created.status_code == 202, created.text
+    assert created.json()["status"] == "queued"
+    assert c.get("/api/v1/analytics/sync-jobs/34567", headers=headers).json()["status"] == "queued"
+
+    target_order_date = datetime.now(timezone.utc) - timedelta(days=10)
+    async def fake_request(db, account, path, params=None):
+        if path.endswith("/items/search"):
+            return {"results": ["MLB12345"], "scroll_id": None,
+                    "paging": {"total": 1}}
+        if path == "/items/bulk":
+            return [{"status_code": 200, "body": {"id": "MLB12345", "seller_id": 34567,
+                    "title": "Anúncio", "status": "active", "price": 20, "attributes": []}}]
+        if path.endswith("/items_visits/time_window"):
+            return {"results": []}
+        if path == "/orders/search":
+            lower = datetime.fromisoformat(params["order.date_created.from"])
+            upper = datetime.fromisoformat(params["order.date_created.to"])
+            included = lower <= target_order_date <= upper
+            return {"results": ([{"id": 12345, "seller": {"id": 34567},
+                "status": "paid", "total_amount": 20,
+                "date_created": target_order_date.isoformat()}] if included else []),
+                "paging": {"total": int(included)}}
+        raise AssertionError(path)
+
+    monkeypatch.setattr("app.routers.analytics.seller_request", fake_request)
+    monkeypatch.setattr(worker, "SessionLocal", Session)
+    for _ in range(24):
+        assert asyncio.run(worker.process_one_sync_batch()) is True
+        status = c.get("/api/v1/analytics/sync-jobs/34567", headers=headers).json()
+        if status["status"] == "completed":
+            break
+    assert status["status"] == "completed", status
+    assert status["listings_scanned"] == 1
+    assert status["listings_saved"] == 1
+    assert status["listings_total"] == 1
+    assert status["orders_saved"] == 1
+    assert status["pages_done"] >= 2
+    with Session() as db:
+        assert db.scalar(select(MercadoLivreSyncJobModel).where(
+            MercadoLivreSyncJobModel.user_id == user_id)).status == "completed"
+        assert len(db.scalars(select(MercadoLivreListingSnapshotModel)).all()) == 1
+        assert len(db.scalars(select(MercadoLivreOrderSnapshotModel)).all()) == 1
