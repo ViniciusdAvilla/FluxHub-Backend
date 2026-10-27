@@ -631,6 +631,17 @@ def test_background_job_runs_after_browser_request_and_records_progress(client, 
     assert created.json()["status"] == "queued"
     assert c.get("/api/v1/analytics/sync-jobs/34567", headers=headers).json()["status"] == "queued"
 
+    # Simulate a worker killed after acquiring a scan cursor. Expired leases
+    # must safely replay the scan instead of skipping an uncommitted page.
+    with Session() as db:
+        job = db.scalar(select(MercadoLivreSyncJobModel))
+        job.status = "running"
+        job.lease_until = datetime.now(timezone.utc) - timedelta(minutes=1)
+        job.scroll_id = "expired-cursor"
+        job.scroll_updated_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        job.listings_scanned = 40
+        db.commit()
+
     target_order_date = datetime.now(timezone.utc) - timedelta(days=10)
     async def fake_request(db, account, path, params=None):
         if path.endswith("/items/search"):
