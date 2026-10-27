@@ -135,10 +135,19 @@ def import_ads_reports(body: AdsImport, user: UserModel = Depends(get_current_us
 
 @router.post("/sync")
 async def sync(account_id: int | None = None,
-               offset: int = Query(default=0, ge=0, le=1000),
+               offset: int = Query(default=0, ge=0),
                limit: int = Query(default=20, ge=1, le=20),
+               phase: str = Query(default="legacy", pattern="^(legacy|listings|orders)$"),
+               scroll_id: str | None = Query(default=None, min_length=1, max_length=4096),
                user: UserModel = Depends(get_current_user),
                db: Session = Depends(get_db)):
+    """Persist one bounded batch. Scan+scroll retrieves listings beyond the 1000-offset cap.
+
+    Each page is an independent transaction; repeating a page is safe because
+    listings/products/orders are upserted by user, account and external ID.
+    The client should continue using next_scroll_id until the API returns null,
+    then paginate orders independently.
+    """
     account = get_account(db, user.id, account_id)
     seller_id = account.mercado_livre_user_id
     source_key = f"ml:{seller_id}"
@@ -148,22 +157,60 @@ async def sync(account_id: int | None = None,
         CompanyDataSourceModel.account_key == source_key))
     if source is None or not source.connected:
         raise HTTPException(409, "Fonte Mercado Livre não conectada.")
+    if phase == "legacy" and offset > 1000:
+        raise HTTPException(422, "Use phase=listings com paginação scan para mais de 1.000 anúncios.")
+    if scroll_id and phase != "listings":
+        raise HTTPException(422, "scroll_id só é aceito para anúncios no modo scan.")
 
-    page = await seller_request(db, account, f"/users/{seller_id}/items/search",
-                                {"limit": limit, "offset": offset})
+    page = {"results": []}
+    next_scroll_id = None
+    if phase != "orders":
+        params = ({"search_type": "scan", **({"scroll_id": scroll_id} if scroll_id else {})}
+                  if phase == "listings" else {"limit": limit, "offset": offset})
+        page = await seller_request(db, account, f"/users/{seller_id}/items/search", params)
+        if not isinstance(page, dict):
+            raise HTTPException(502, "Resposta de anúncios inválida.")
+        if phase == "listings":
+            cursor = page.get("scroll_id")
+            if cursor is not None and (not isinstance(cursor, str) or not 1 <= len(cursor) <= 4096):
+                raise HTTPException(502, "Cursor de anúncios inválido.")
+            next_scroll_id = cursor
+
     ids = page.get("results", [])
     if not isinstance(ids, list):
         raise HTTPException(502, "Lista de anúncios inválida.")
-    ids = [item for item in ids if isinstance(item, str) and item.isalnum()][:limit]
+    # Never silently skip malformed IDs or a partial bulk response; retry the page.
+    if len(ids) > (100 if phase == "listings" else limit) or any(not isinstance(item, str) or not item.isalnum() for item in ids):
+        raise HTTPException(502, "Lista de anúncios contém IDs inválidos.")
     details = []
-    if ids:
-        data = await seller_request(db, account, "/items/bulk",
-                                    {"ids": ",".join(ids)})
+    # The scan returns up to 100 IDs, but /items/bulk accepts only 20 per request.
+    # Validate every bulk chunk before committing, so partial API results are not
+    # mistaken for a successfully imported page.
+    for start in range(0, len(ids), 20):
+        chunk = ids[start:start + 20]
+        data = await seller_request(db, account, "/items/bulk", {"ids": ",".join(chunk)})
         if not isinstance(data, list):
             raise HTTPException(502, "Detalhes de anúncios inválidos.")
-        details = [row.get("body") for row in data if isinstance(row, dict)
-                   and row.get("status_code", row.get("code")) == 200 and isinstance(row.get("body"), dict)]
+        bodies = [row.get("body") for row in data if isinstance(row, dict)
+                  and row.get("status_code", row.get("code")) == 200
+                  and isinstance(row.get("body"), dict)]
+        if len(bodies) != len(chunk) or {str(x.get("id")) for x in bodies} != set(chunk):
+            raise HTTPException(502, "Lote de anúncios incompleto; página não avançada.")
+        details.extend(bodies)
+    if not ids:
+        next_scroll_id = None
 
+    # Read each existing page in two queries instead of two queries per item.
+    listings_by_id = {row.external_id: row for row in db.scalars(
+        select(Listing).where(
+            Listing.user_id == user.id,
+            Listing.mercado_livre_user_id == seller_id,
+            Listing.external_id.in_(ids))).all()}
+    products_by_id = {row.external_id: row for row in db.scalars(
+        select(ProductModel).where(
+            ProductModel.company_id == user.id,
+            ProductModel.source_key == source_key,
+            ProductModel.external_id.in_(ids))).all()}
     imported = 0
     for item in details:
         if int(item.get("seller_id") or 0) != seller_id:
@@ -171,13 +218,12 @@ async def sync(account_id: int | None = None,
         item_id = str(item.get("id") or "")
         if not item_id:
             continue
-        listing = db.scalar(select(Listing).where(
-            Listing.user_id == user.id, Listing.mercado_livre_user_id == seller_id,
-            Listing.external_id == item_id))
+        listing = listings_by_id.get(item_id)
         if listing is None:
             listing = Listing(user_id=user.id, mercado_livre_user_id=seller_id,
                               external_id=item_id)
             db.add(listing)
+            listings_by_id[item_id] = listing
         listing.title = str(item.get("title") or "")[:255]
         listing.category_id = item.get("category_id")
         listing.status = str(item.get("status") or "unknown")[:40]
@@ -187,14 +233,12 @@ async def sync(account_id: int | None = None,
         listing.published_at = parse_date(item["date_created"]) if item.get("date_created") else None
         listing.captured_at = now()
         # No synthetic 30-day visits or orders; use real Ads reports separately.
-        product = db.scalar(select(ProductModel).where(
-            ProductModel.company_id == user.id,
-            ProductModel.source_key == source_key,
-            ProductModel.external_id == item_id))
+        product = products_by_id.get(item_id)
         if product is None:
             product = ProductModel(company_id=user.id, source_key=source_key,
                                    external_id=item_id, category="", brand="")
             db.add(product)
+            products_by_id[item_id] = product
         product.title = listing.title
         product.category = str(item.get("category_id") or "Sem categoria")
         brand = next((a.get("value_name") for a in item.get("attributes", [])
@@ -212,78 +256,104 @@ async def sync(account_id: int | None = None,
         product.item_condition = str(item.get("condition") or "unknown")[:50]
         imported += 1
 
-    # Orders are independently paginated; do not assert this captures all history.
-    # Se o vendedor não concedeu escopo de pedidos ou a API falhou,
-    # a importação de anúncios não deve ser descartada. Indique a falha.
+
+    # Orders use a separate offset. A listing scan must not stop order pagination.
     orders_unavailable = False
-    try:
-        orders_page = await seller_request(db, account, "/orders/search", {
-            "seller": seller_id, "limit": limit, "offset": offset,
-            "sort": "date_desc"})
-    except HTTPException:
-        orders_page = {"results": []}
-        orders_unavailable = True
     saved_orders = 0
-    for item in orders_page.get("results", []):
-        if not isinstance(item, dict) or not item.get("id"):
-            continue
-        seller = item.get("seller") or {}
-        if int(seller.get("id") or 0) != seller_id:
-            continue
-        external_id = str(item["id"])
-        row = db.scalar(select(Order).where(
-            Order.user_id == user.id, Order.mercado_livre_user_id == seller_id,
-            Order.external_id == external_id))
-        if row is None:
-            row = Order(user_id=user.id, mercado_livre_user_id=seller_id,
-                        external_id=external_id)
-            db.add(row)
-        row.status = str(item.get("status") or "")[:40]
-        row.total_amount = float(item.get("total_amount") or 0)
-        row.created_at = parse_date(item.get("date_created"))
-        row.is_cancelled = row.status == "cancelled"
-        saved_orders += 1
-    # Official seller-wide daily visits; only persist data returned by ML.
-    # The optional metric must never block order/listing synchronization.
+    next_orders_offset = None
+    if phase != "listings":
+        try:
+            orders_page = await seller_request(db, account, "/orders/search", {
+                "seller": seller_id, "limit": limit, "offset": offset,
+                "sort": "date_desc"})
+            if not isinstance(orders_page, dict) or not isinstance(orders_page.get("results"), list):
+                raise HTTPException(502, "Resposta de pedidos inválida.")
+        except HTTPException:
+            orders_page = {"results": []}
+            orders_unavailable = True
+        if not orders_unavailable:
+            order_results = orders_page["results"]
+            if len(order_results) > limit:
+                raise HTTPException(502, "Página de pedidos maior do que o solicitado.")
+            paging = orders_page.get("paging") or {}
+            total = paging.get("total") if isinstance(paging, dict) else None
+            if len(order_results) == limit and (not isinstance(total, int) or offset + len(order_results) < total):
+                next_orders_offset = offset + len(order_results)
+        order_ids = [str(item["id"]) for item in orders_page.get("results", [])
+                     if isinstance(item, dict) and item.get("id")]
+        orders_by_id = {row.external_id: row for row in db.scalars(
+            select(Order).where(
+                Order.user_id == user.id,
+                Order.mercado_livre_user_id == seller_id,
+                Order.external_id.in_(order_ids))).all()}
+        saved_orders = 0
+        for item in orders_page.get("results", []):
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            seller = item.get("seller") or {}
+            if int(seller.get("id") or 0) != seller_id:
+                continue
+            external_id = str(item["id"])
+            row = orders_by_id.get(external_id)
+            if row is None:
+                row = Order(user_id=user.id, mercado_livre_user_id=seller_id,
+                            external_id=external_id)
+                db.add(row)
+                orders_by_id[external_id] = row
+            row.status = str(item.get("status") or "")[:40]
+            row.total_amount = float(item.get("total_amount") or 0)
+            row.created_at = parse_date(item.get("date_created"))
+            row.is_cancelled = row.status == "cancelled"
+            saved_orders += 1
+
+    # The visit metric is optional and is fetched once on the initial listings batch.
     visits_synced = 0
     visits_error = False
-    try:
-        visitor_data = await seller_request(
-            db, account,
-            f"/users/{seller_id}/items_visits/time_window",
-            {"last": 30, "unit": "day"})
-        for entry in visitor_data.get("results", []):
-            if not isinstance(entry, dict) or entry.get("total") is None:
-                continue
-            day = date.fromisoformat(str(entry.get("date", ""))[:10])
-            count = int(entry["total"])
-            if count < 0:
-                continue
-            record = db.scalar(select(Visits).where(
-                Visits.user_id == user.id,
-                Visits.mercado_livre_user_id == seller_id,
-                Visits.report_date == day))
-            if record is None:
-                record = Visits(user_id=user.id, mercado_livre_user_id=seller_id,
-                                report_date=day)
-                db.add(record)
-            record.total_visits = count
-            record.captured_at = now()
-            visits_synced += 1
-    except (HTTPException, TypeError, ValueError, OverflowError):
-        visits_error = True
+    if phase == "legacy" or (phase == "listings" and not scroll_id):
+        visits_synced = 0
+        visits_error = False
+        try:
+            visitor_data = await seller_request(
+                db, account,
+                f"/users/{seller_id}/items_visits/time_window",
+                {"last": 30, "unit": "day"})
+            for entry in visitor_data.get("results", []):
+                if not isinstance(entry, dict) or entry.get("total") is None:
+                    continue
+                day = date.fromisoformat(str(entry.get("date", ""))[:10])
+                count = int(entry["total"])
+                if count < 0:
+                    continue
+                record = db.scalar(select(Visits).where(
+                    Visits.user_id == user.id,
+                    Visits.mercado_livre_user_id == seller_id,
+                    Visits.report_date == day))
+                if record is None:
+                    record = Visits(user_id=user.id, mercado_livre_user_id=seller_id,
+                                    report_date=day)
+                    db.add(record)
+                record.total_visits = count
+                record.captured_at = now()
+                visits_synced += 1
+        except (HTTPException, TypeError, ValueError, OverflowError):
+            visits_error = True
+
     source.last_synced_at = now()
     source.status_message = (f"{imported} anúncios e {saved_orders} pedidos nesta página."
                              + (" Consulta de pedidos indisponível." if orders_unavailable else ""))
     db.commit()
-    return {"source": source_key, "listings": imported,
-            "orders": saved_orders, "offset": offset,
-            "limit": limit, "next_offset": offset + limit if len(ids) == limit else None,
-            "partial": True, "ads_data_synced": False,
-            "visit_days_synced": visits_synced,
-            "visits_unavailable": visits_error,
-            "orders_unavailable": orders_unavailable}
-
+    return {
+        "source": source_key, "listings": imported, "orders": saved_orders,
+        "phase": phase, "offset": offset, "limit": limit,
+        "next_scroll_id": next_scroll_id if phase == "listings" else None,
+        "next_orders_offset": next_orders_offset,
+        "listings_complete": phase == "orders" or (phase == "listings" and next_scroll_id is None),
+        "orders_complete": phase != "listings" and not orders_unavailable and next_orders_offset is None,
+        "next_offset": offset + limit if phase == "legacy" and len(ids) == limit and offset + limit <= 1000 else None,
+        "partial": next_scroll_id is not None or next_orders_offset is not None or orders_unavailable,
+        "ads_data_synced": False, "visit_days_synced": visits_synced,
+        "visits_unavailable": visits_error, "orders_unavailable": orders_unavailable,
+    }
 
 @router.get("/ads-performance")
 def ads_performance(user: UserModel = Depends(get_current_user),

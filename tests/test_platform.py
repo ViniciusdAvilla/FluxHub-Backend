@@ -299,3 +299,123 @@ def test_saas_marketplace_catalog_and_multi_tenant_oauth(client, monkeypatch):
                  headers=admin_headers, params={"account_id": 23456}).status_code == 404
     assert c.delete("/api/v1/connectors/mercado-livre",
                     headers=seller2_headers, params={"account_id": 12345}).status_code == 404
+
+
+def test_sync_scans_more_than_1000_items_and_paginates_orders_separately(client, monkeypatch):
+    """Scan has no 1000-item offset wall; 20-item bulk chunks are fully stored."""
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    from datetime import datetime, timezone
+    from sqlalchemy import func
+    from app.core.security import encrypt_token
+    from app.database.models import (
+        MercadoLivreConnectionModel, MercadoLivreOrderSnapshotModel,
+    )
+
+    with Session() as db:
+        user = db.scalar(select(UserModel).where(UserModel.email == "admin@example.com"))
+        db.add(MercadoLivreConnectionModel(
+            user_id=user.id, mercado_livre_user_id=34567, nickname="Loja teste",
+            access_token_encrypted=encrypt_token("fake-access"),
+            refresh_token_encrypted=encrypt_token("fake-refresh"),
+            expires_at=datetime.now(timezone.utc),
+        ))
+        db.add(CompanyDataSourceModel(
+            company_id=user.id, provider="mercado_livre", account_key="ml:34567",
+            display_name="Loja teste", enabled=True, connected=True,
+        ))
+        db.commit()
+        user_id = user.id
+
+    total_items = 1025
+    all_ids = [f"MLB{90000000 + i}" for i in range(total_items)]
+    bulk_sizes = []
+
+    async def fake_seller_request(db, connection, path, params=None):
+        if path.endswith("/items/search"):
+            assert params["search_type"] == "scan"
+            assert "offset" not in params and "limit" not in params
+            page = int(params.get("scroll_id", "cursor-0").split("-")[1])
+            start = page * 100
+            end = min(start + 100, total_items)
+            return {
+                "results": all_ids[start:end],
+                "scroll_id": f"cursor-{page + 1}" if end < total_items else None,
+            }
+        if path == "/items/bulk":
+            ids = params["ids"].split(",")
+            bulk_sizes.append(len(ids))
+            return [{"status_code": 200, "body": {
+                "id": item_id, "seller_id": 34567,
+                "title": "Produto teste", "status": "active", "price": 49.9,
+                "category_id": "MLB1", "available_quantity": 1, "attributes": [],
+            }} for item_id in ids]
+        if path == "/orders/search":
+            offset = params["offset"]
+            return {
+                "paging": {"total": 23},
+                "results": [{
+                    "id": 7000000 + i, "seller": {"id": 34567}, "status": "paid",
+                    "total_amount": 10, "date_created": "2026-10-20T12:00:00Z",
+                } for i in range(offset, min(offset + 20, 23))],
+            }
+        if path.endswith("/items_visits/time_window"):
+            return {"results": []}
+        raise AssertionError(path)
+
+    monkeypatch.setattr("app.routers.analytics.seller_request", fake_seller_request)
+    imported = 0
+    cursor = None
+    for _ in range(12):
+        params = {"account_id": 34567, "phase": "listings"}
+        if cursor:
+            params["scroll_id"] = cursor
+        result = c.post("/api/v1/analytics/sync", params=params, headers=headers)
+        assert result.status_code == 200, result.text
+        payload = result.json()
+        assert payload["orders"] == 0
+        imported += payload["listings"]
+        cursor = payload["next_scroll_id"]
+        if cursor is None:
+            break
+    assert cursor is None
+    assert imported == total_items
+    assert max(bulk_sizes) == 20
+    assert len(bulk_sizes) >= 52
+
+    order_offset = 0
+    order_count = 0
+    for _ in range(3):
+        result = c.post("/api/v1/analytics/sync", headers=headers, params={
+            "account_id": 34567, "phase": "orders", "offset": order_offset,
+        })
+        assert result.status_code == 200, result.text
+        payload = result.json()
+        assert payload["listings"] == 0
+        order_count += payload["orders"]
+        if payload["next_orders_offset"] is None:
+            break
+        order_offset = payload["next_orders_offset"]
+    assert order_count == 23
+
+    with Session() as db:
+        products = db.scalar(select(func.count()).select_from(ProductModel).where(
+            ProductModel.company_id == user_id,
+            ProductModel.source_key == "ml:34567"))
+        orders = db.scalar(select(func.count()).select_from(
+            MercadoLivreOrderSnapshotModel).where(
+                MercadoLivreOrderSnapshotModel.user_id == user_id,
+                MercadoLivreOrderSnapshotModel.mercado_livre_user_id == 34567))
+        assert products == total_items
+        assert orders == 23
+
+    # Re-importing a page never inserts duplicate products.
+    repeated = c.post("/api/v1/analytics/sync", headers=headers, params={
+        "account_id": 34567, "phase": "listings",
+    })
+    assert repeated.status_code == 200, repeated.text
+    with Session() as db:
+        products = db.scalar(select(func.count()).select_from(ProductModel).where(
+            ProductModel.company_id == user_id,
+            ProductModel.source_key == "ml:34567"))
+        assert products == total_items
