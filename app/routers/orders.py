@@ -23,6 +23,7 @@ from app.database.models import (
 )
 from app.database.session import get_db
 from app.routers.mercado_livre import get_account, seller_request
+from app.services.order_finance import summarize_order_finance
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -270,6 +271,24 @@ def order_detail(
     db: Session = Depends(get_db),
 ):
     return _decorate(db, [_order_for_user(db, user.id, order_id, account_id)])[0]
+
+
+@router.get("/{order_id}/financial-details")
+def order_financial_details(
+    order_id: str,
+    account_id: int = Query(ge=1),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Financial breakdown for one authorized tenant order without buyer PII."""
+    order = _order_for_user(db, user.id, order_id, account_id)
+    detail = _decorate(db, [order])[0]
+    identifiers = [entry["item_id"] for entry in detail["items"] if entry.get("item_id")]
+    rates = {cost.external_id: cost.marketplace_fee_percent for cost in
+             db.scalars(select(Cost).where(
+                 Cost.user_id == user.id, Cost.external_id.in_(identifiers))).all()
+             } if identifiers else {}
+    return summarize_order_finance(detail, rates)
 
 
 @router.post("/{order_id}/refresh-items")
