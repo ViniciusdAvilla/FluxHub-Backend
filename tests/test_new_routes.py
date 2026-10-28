@@ -15,5 +15,5 @@ def test_new_paths_are_registered_without_missing_or_duplicate_contract():
     for path, method in expected.items():
         matching = [route for route in routes
                     if route.path == path and method in route.methods]
-        assert len(matching) == 1, (path, method)
+        assert len(matching) == 1, (path, method, [(r.path, r.methods) for r in routes if "financial-details" in r.path or "claude" in r.path or "exports" in r.path])
         assert matching[0].dependencies or matching[0].dependant.dependencies
