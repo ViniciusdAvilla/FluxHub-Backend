@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
 from app.database.models import (
@@ -18,6 +18,7 @@ from app.database.models import (
     MercadoLivreOrderLineModel as OrderLine,
     MercadoLivreListingPhotoModel as ListingPhoto,
     MercadoLivreBuyerOrderModel as BuyerOrder,
+    MercadoLivreSyncJobModel as SyncJob,
 )
 from app.database.session import get_db
 from app.routers.mercado_livre import get_account, seller_request
@@ -145,6 +146,118 @@ def list_costs(limit: int = Query(default=500, ge=1, le=1000),
              "tax_percent": c.tax_percent, "shipping_cost": c.shipping_cost,
              "other_cost": c.other_cost} for c in rows]
 
+
+
+
+@router.get("/catalog-metrics")
+def catalog_metrics(
+    days: int = Query(default=30, ge=1, le=365),
+    account_id: int | None = Query(default=None, ge=1),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Real paid units, saved costs and *reported* Ads by item for the catalog.
+
+    The listing sync cannot supply sales_30d: quantities come from order lines,
+    and Product Ads is a separate source. Never substitute missing metrics with 0.
+    """
+    connected_accounts = set(db.scalars(
+        select(MercadoLivreConnectionModel.mercado_livre_user_id).where(
+            MercadoLivreConnectionModel.user_id == user.id)
+    ).all())
+    if account_id is not None and account_id not in connected_accounts:
+        raise HTTPException(403, "Conta Mercado Livre não pertence ao usuário.")
+
+    cutoff = now() - timedelta(days=days)
+    line_match = and_(
+        OrderLine.user_id == Order.user_id,
+        OrderLine.mercado_livre_user_id == Order.mercado_livre_user_id,
+        OrderLine.order_external_id == Order.external_id,
+    )
+    paid_filters = [
+        Order.user_id == user.id,
+        Order.status == "paid",
+        Order.is_cancelled.is_(False),
+        Order.created_at >= cutoff,
+    ]
+    if account_id is not None:
+        paid_filters.append(Order.mercado_livre_user_id == account_id)
+
+    units_stmt = (
+        select(OrderLine.item_id, func.sum(OrderLine.quantity))
+        .select_from(OrderLine)
+        .join(Order, line_match)
+        .where(*paid_filters)
+        .group_by(OrderLine.item_id)
+    )
+    sales_by_item = {
+        item_id: int(quantity)
+        for item_id, quantity in db.execute(units_stmt).all()
+    }
+
+    paid_orders = db.scalar(select(func.count(Order.id)).where(*paid_filters)) or 0
+    enriched_orders = db.scalar(
+        select(func.count(func.distinct(Order.id)))
+        .select_from(Order)
+        .join(OrderLine, line_match)
+        .where(*paid_filters)
+    ) or 0
+
+    # Select only worker checkpoint columns. Some deployments have not yet
+    # applied the optional pending_listing_ids additive migration.
+    finished_accounts = set(db.scalars(
+        select(SyncJob.mercado_livre_user_id).where(
+            SyncJob.user_id == user.id,
+            SyncJob.status == "completed",
+            SyncJob.phase == "done",
+        )
+    ).all())
+    selected_accounts = {account_id} if account_id is not None else connected_accounts
+    orders_complete = (
+        bool(selected_accounts)
+        and selected_accounts.issubset(finished_accounts)
+        and paid_orders == enriched_orders
+    )
+
+    # The previous homepage queried only the first 1000 saved costs. Return all
+    # tenant-owned costs; they are small metadata rows, not full product objects.
+    costs = db.execute(select(
+        Cost.external_id, Cost.unit_cost, Cost.manufacturer,
+    ).where(Cost.user_id == user.id)).all()
+
+    ads_stmt = select(
+        Ads.external_id,
+        func.sum(Ads.ad_spend),
+        func.sum(Ads.attributed_revenue),
+    ).where(
+        Ads.user_id == user.id,
+        Ads.report_date >= cutoff.date(),
+    )
+    if account_id is not None:
+        ads_stmt = ads_stmt.where(Ads.mercado_livre_user_id == account_id)
+    ads_rows = db.execute(ads_stmt.group_by(Ads.external_id)).all()
+
+    return {
+        "days": days,
+        "account_id": account_id,
+        "sales_by_item": sales_by_item,
+        "paid_orders": int(paid_orders),
+        "enriched_paid_orders": int(enriched_orders),
+        "orders_complete": orders_complete,
+        "costs": [
+            {"external_id": item_id, "unit_cost": unit_cost,
+             "manufacturer": manufacturer or ""}
+            for item_id, unit_cost, manufacturer in costs
+        ],
+        "ads_by_item": {
+            item_id: {
+                "ad_spend": round(float(spend or 0), 2),
+                "attributed_revenue": round(float(revenue or 0), 2),
+            }
+            for item_id, spend, revenue in ads_rows
+        },
+        "ads_source": "imported_reports_only",
+    }
 
 @router.post("/ads-daily/import")
 def import_ads_reports(body: AdsImport, user: UserModel = Depends(get_current_user),
