@@ -6,7 +6,7 @@ which already belongs to their authorized Mercado Livre account.
 """
 from datetime import datetime, timedelta, timezone
 from math import isfinite
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import and_, exists, func, or_, select
@@ -140,6 +140,8 @@ def paged_orders(
     search: str | None = Query(default=None, max_length=100),
     min_amount: float | None = Query(default=None, ge=0),
     max_amount: float | None = Query(default=None, ge=0),
+    sort_by: Literal["date", "amount", "status"] = "date",
+    sort_dir: Literal["asc", "desc"] = "desc",
     user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -171,8 +173,14 @@ def paged_orders(
         source = source.where(Order.status == status)
     total = db.scalar(source.with_only_columns(
         func.count(Order.id)).order_by(None)) or 0
+    order_column = {
+        "date": Order.created_at,
+        "amount": Order.total_amount,
+        "status": Order.status,
+    }[sort_by]
+    order_expression = order_column.asc() if sort_dir == "asc" else order_column.desc()
     rows = db.scalars(source.order_by(
-        Order.created_at.desc(), Order.id.desc()).offset(offset).limit(limit)).all()
+        order_expression, Order.id.desc()).offset(offset).limit(limit)).all()
     paid_query = _matching(_base(user.id, account_id, days), search).where(
         Order.status == "paid")
     if min_amount is not None:
