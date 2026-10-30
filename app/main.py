@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.config.settings import settings
+from app.database.claude_provider_schema import ensure_claude_provider_schema
 from sqlalchemy.exc import SQLAlchemyError
 from app.database.order_enrichment_schema import (
     ensure_order_enrichment_schema, ensure_sync_job_schema,
@@ -54,6 +55,11 @@ async def lifespan(app: FastAPI):
     except SQLAlchemyError:
         schema_ready = False
         logger.exception("sync_job_schema_bootstrap_failed")
+    # Claude configuration is optional: a DDL failure must not stop sync/OAuth.
+    try:
+        ensure_claude_provider_schema()
+    except SQLAlchemyError:
+        logger.exception("claude_provider_schema_bootstrap_failed")
     # A missing checkpoint column causes repeated UndefinedColumn errors.
     # Keep login/OAuth endpoints online, but do not run a broken worker.
     if settings.sync_worker_enabled and not schema_ready:

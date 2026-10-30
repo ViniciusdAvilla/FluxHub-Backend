@@ -458,3 +458,18 @@ class MercadoLivreSyncJobModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc))
+
+
+class ClaudeProviderConfigModel(Base):
+    """Encrypted, isolated Claude API configuration for a FluxHub user."""
+
+    __tablename__ = "claude_provider_config"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("fluxhub_users.id", ondelete="CASCADE"), primary_key=True
+    )
+    api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
