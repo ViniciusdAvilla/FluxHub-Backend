@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from app.config.settings import settings
 from app.database.claude_provider_schema import ensure_claude_provider_schema
+from app.database.mcp_schema import ensure_mcp_schema
 from sqlalchemy.exc import SQLAlchemyError
 from app.database.order_enrichment_schema import (
     ensure_order_enrichment_schema, ensure_sync_job_schema,
@@ -32,6 +33,8 @@ from app.routers.dashboard import router as dashboard_router
 from app.routers.pricing import router as pricing_router
 from app.routers.exports import router as exports_router
 from app.routers.claude_agents import router as claude_agents_router
+from app.routers.mcp_oauth import router as mcp_oauth_router
+from app.routers.fluxhub_mcp import router as fluxhub_mcp_router
 from app.routers.listing_health import router as listing_health_router
 
 
@@ -60,6 +63,10 @@ async def lifespan(app: FastAPI):
         ensure_claude_provider_schema()
     except SQLAlchemyError:
         logger.exception("claude_provider_schema_bootstrap_failed")
+    try:
+        ensure_mcp_schema()
+    except SQLAlchemyError:
+        logger.exception("mcp_schema_bootstrap_failed")
     # A missing checkpoint column causes repeated UndefinedColumn errors.
     # Keep login/OAuth endpoints online, but do not run a broken worker.
     if settings.sync_worker_enabled and not schema_ready:
@@ -130,6 +137,8 @@ app.include_router(
 app.include_router(pricing_router, prefix=settings.api_prefix)
 app.include_router(exports_router, prefix=settings.api_prefix)
 app.include_router(claude_agents_router, prefix=settings.api_prefix)
+app.include_router(mcp_oauth_router, prefix=settings.api_prefix)
+app.include_router(fluxhub_mcp_router, prefix=settings.api_prefix)
 app.include_router(listing_health_router, prefix=settings.api_prefix)
 
 # Protege todos os caminhos, inclusive /docs e /openapi.json.
