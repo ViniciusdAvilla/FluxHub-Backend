@@ -1,5 +1,9 @@
 """Snapshot-based seller analytics. Never fabricate marketplace metrics."""
 from collections import defaultdict
+import asyncio
+import re
+from time import monotonic
+import httpx
 import logging
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -22,6 +26,7 @@ from app.database.models import (
 )
 from app.database.session import get_db
 from app.routers.mercado_livre import get_account, seller_request
+from app.connectors.mercado_livre.auth import API_BASE_URL, get_valid_access_token, MercadoLivreOAuthError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
@@ -258,6 +263,76 @@ def catalog_metrics(
         },
         "ads_source": "imported_reports_only",
     }
+
+# Nomes são metadados públicos, enquanto a autenticação permanece no backend.
+# Cache em memória evita consultar a API do marketplace em cada abertura do painel.
+_CATEGORY_CACHE: dict[str, tuple[float, str]] = {}
+_CATEGORY_CACHE_TTL = 7 * 24 * 60 * 60
+
+
+def _validated_category_ids(value: str) -> list[str]:
+    values = list(dict.fromkeys(value.split(",")))
+    if not 1 <= len(values) <= 5 or any(
+        re.fullmatch(r"ML[A-Z]{1,2}\d{3,15}", item) is None for item in values
+    ):
+        raise HTTPException(422, "Informe até cinco identificadores de categoria válidos.")
+    return values
+
+
+@router.get("/category-names")
+async def category_names(
+    ids: str = Query(min_length=6, max_length=128),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Retorna nomes reais do catálogo do Mercado Livre sem expor o token OAuth."""
+    requested = _validated_category_ids(ids)
+    stamp = monotonic()
+    names: dict[str, str] = {}
+    missing: list[str] = []
+    for category_id in requested:
+        cached = _CATEGORY_CACHE.get(category_id)
+        if cached and cached[0] > stamp:
+            names[category_id] = cached[1]
+        else:
+            missing.append(category_id)
+    if not missing:
+        return names
+
+    connection = db.scalar(select(MercadoLivreConnectionModel).where(
+        MercadoLivreConnectionModel.user_id == user.id,
+    ).order_by(MercadoLivreConnectionModel.id))
+    if connection is None:
+        return names
+    try:
+        token = await get_valid_access_token(connection, db)
+    except (MercadoLivreOAuthError, HTTPException):
+        return names
+
+    semaphore = asyncio.Semaphore(3)
+    async with httpx.AsyncClient(timeout=3.5) as client:
+        async def resolve(category_id: str) -> None:
+            async with semaphore:
+                try:
+                    response = await client.get(
+                        f"{API_BASE_URL}/categories/{category_id}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    if response.status_code != 200:
+                        return
+                    payload = response.json()
+                    label = payload.get("name") if isinstance(payload, dict) else None
+                    if isinstance(label, str) and 1 <= len(label.strip()) <= 100:
+                        names[category_id] = label.strip()
+                        if len(_CATEGORY_CACHE) >= 5000:
+                            _CATEGORY_CACHE.clear()
+                        _CATEGORY_CACHE[category_id] = (monotonic() + _CATEGORY_CACHE_TTL, label.strip())
+                except (httpx.RequestError, ValueError, TypeError):
+                    return
+
+        await asyncio.gather(*(resolve(category_id) for category_id in missing))
+    return names
+
 
 @router.post("/ads-daily/import")
 def import_ads_reports(body: AdsImport, user: UserModel = Depends(get_current_user),
