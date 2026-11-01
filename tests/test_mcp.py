@@ -141,7 +141,7 @@ def test_mcp_jsonrpc_protocol_requires_mcp_token(db):
     client = mcp_oauth.register_client(mcp_oauth.ClientInput(
         client_name="Test Claude", redirect_uris=["https://claude.ai/callback"]), db=db)
     grant = McpGrant(id="test_grant", client_id=client["client_id"], user_id=1,
-                     refresh_hash="f" * 64,
+                     refresh_hash="f" * 64, token_version=0,
                      expires_at=mcp_oauth.now_utc() + __import__("datetime").timedelta(days=2))
     db.add(grant)
     db.commit()
@@ -156,3 +156,33 @@ def test_mcp_jsonrpc_protocol_requires_mcp_token(db):
     assert result.status_code == 200
     output = json.loads(result.body)
     assert any(x["name"] == "consultar_vendas" for x in output["result"]["tools"])
+
+
+def test_password_session_version_change_revokes_old_mcp_grant(db):
+    client = mcp_oauth.register_client(mcp_oauth.ClientInput(
+        client_name="Claude", redirect_uris=["https://claude.ai/callback"]), db=db)
+    valid_refresh_token = "valid_refresh_token_for_session_revocation_test"
+    grant = McpGrant(
+        id="grant_revocation", client_id=client["client_id"], user_id=1,
+        refresh_hash=mcp_oauth.digest(valid_refresh_token), token_version=0,
+        expires_at=mcp_oauth.now_utc() + __import__("datetime").timedelta(days=1),
+    )
+    db.add(grant)
+    db.commit()
+    access = mcp_oauth._sign({
+        "iss": "https://myfluxhub.tech", "aud": mcp_oauth.resource_url(),
+        "type": "mcp", "sub": "1", "ver": 0, "gid": grant.id,
+        "exp": int(__import__("time").time()) + 3600,
+    })
+    assert mcp_oauth.authorized_user(db, access).id == 1
+    user = db.get(UserModel, 1)
+    user.token_version = 1
+    db.commit()
+    with pytest.raises(HTTPException):
+        mcp_oauth.authorized_user(db, access)
+    with pytest.raises(HTTPException):
+        mcp_oauth.exchange(
+            grant_type="refresh_token", client_id=client["client_id"],
+            code="", redirect_uri="", code_verifier="",
+            refresh_token=valid_refresh_token, db=db,
+        )

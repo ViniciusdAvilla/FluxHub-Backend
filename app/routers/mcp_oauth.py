@@ -93,7 +93,8 @@ def authorized_user(db: Session, token: str) -> UserModel:
         user = db.get(UserModel, int(claims["sub"]))
         if (not grant or not user or grant.revoked_at or
             _utc(grant.expires_at) <= now_utc() or grant.user_id != user.id or
-            not user.is_active or user.token_version != claims.get("ver")):
+            not user.is_active or user.token_version != claims.get("ver") or
+            grant.token_version != user.token_version):
             raise ValueError("Autorização revogada")
         return user
     except (ValueError, KeyError, TypeError, OverflowError) as error:
@@ -262,7 +263,7 @@ def exchange(
         grant = McpGrant(
             id=secrets.token_urlsafe(24), client_id=client_id,
             user_id=user.id, refresh_hash=digest(refresh),
-            expires_at=now_utc() + timedelta(days=90),
+            token_version=user.token_version, expires_at=now_utc() + timedelta(days=90),
         )
         db.add(grant)
         response = _token_response(db, grant, user, refresh)
@@ -276,7 +277,7 @@ def exchange(
         if not grant or grant.revoked_at or _utc(grant.expires_at) <= now_utc():
             raise HTTPException(400, "invalid_grant")
         user = db.get(UserModel, grant.user_id)
-        if not user or not user.is_active:
+        if not user or not user.is_active or grant.token_version != user.token_version:
             raise HTTPException(400, "invalid_grant")
         fresh = secrets.token_urlsafe(48)
         grant.refresh_hash = digest(fresh)
