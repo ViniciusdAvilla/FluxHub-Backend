@@ -31,6 +31,7 @@ from app.routers.stock import router as stock_router
 from app.routers.sales import router as sales_router
 from app.routers.dashboard import router as dashboard_router
 from app.routers.pricing import router as pricing_router
+from app.routers.cost_import import router as cost_import_router
 from app.routers.exports import router as exports_router
 from app.routers.claude_agents import router as claude_agents_router
 from app.routers.mcp_oauth import router as mcp_oauth_router
@@ -135,6 +136,7 @@ app.include_router(
 )
 
 app.include_router(pricing_router, prefix=settings.api_prefix)
+app.include_router(cost_import_router, prefix=settings.api_prefix)
 app.include_router(exports_router, prefix=settings.api_prefix)
 app.include_router(claude_agents_router, prefix=settings.api_prefix)
 app.include_router(mcp_oauth_router, prefix=settings.api_prefix)
