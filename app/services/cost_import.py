@@ -92,8 +92,10 @@ def parse_csv(content: bytes) -> list[CostCsvRow]:
     reader = csv.DictReader(io.StringIO(raw), delimiter=delimiter, strict=True)
     if not reader.fieldnames:
         raise CostImportError("Cabeçalho CSV ausente.")
-    cols = {_header(name): name for name in reader.fieldnames if name is not None}
-    if len(cols) != len([name for name in reader.fieldnames if name and name.strip()]):
+    # Some ERP exports end each row with ';', leaving an unnamed empty column.
+    named_headers = [name for name in reader.fieldnames if name and name.strip()]
+    cols = {_header(name): name for name in named_headers}
+    if len(cols) != len(named_headers):
         raise CostImportError("Cabeçalhos repetidos na planilha.")
     price_col = cols.get("precomedio")
     code_col = cols.get("coditem") or cols.get("codigoitem")
@@ -228,9 +230,34 @@ def analyze_cost_import(db: Session, user_id: int, content: bytes) -> dict:
             "preco_invalido": states["preco_invalido"],
             "sem_identificador": states["sem_identificador"],
         },
-        "rows": classified[:MAX_PREVIEW_ROWS],
+        "rows": _representative_rows(classified),
         "preview_limited": len(classified) > MAX_PREVIEW_ROWS,
     }
+
+
+def _representative_rows(rows: list[dict]) -> list[dict]:
+    """Show a bounded cross-section so matches aren't hidden by early placeholder rows."""
+    quotas = {
+        "atualizar": 35, "sem_alteracao": 10, "nao_encontrado": 15,
+        "ambiguo": 10, "duplicado": 10, "revisar_valor": 10,
+        "preco_invalido": 5, "sem_identificador": 5,
+    }
+    picked: list[dict] = []
+    picked_lines: set[int] = set()
+    for status, limit in quotas.items():
+        for row in rows:
+            if row["status"] == status and limit:
+                picked.append(row)
+                picked_lines.add(row["line"])
+                limit -= 1
+            if not limit:
+                break
+    for row in rows:
+        if len(picked) >= MAX_PREVIEW_ROWS:
+            break
+        if row["line"] not in picked_lines:
+            picked.append(row)
+    return sorted(picked, key=lambda item: item["line"])
 
 
 def _signing_key() -> bytes:
