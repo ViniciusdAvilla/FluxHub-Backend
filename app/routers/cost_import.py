@@ -1,10 +1,13 @@
-"""Preview and confirm a tenant-scoped average purchase-cost CSV import."""
+"""Preview and confirm a tenant-scoped bulk purchase-cost document import."""
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
 from app.database.models import UserModel
 from app.database.session import get_db
+from app.services.cost_documents import ALLOWED_EXTENSIONS
 from app.services.cost_import import (
     MAX_COST_IMPORT_BYTES, CostImportError, analyze_cost_import,
     apply_cost_import, preview_token,
@@ -13,13 +16,13 @@ from app.services.cost_import import (
 router = APIRouter(prefix="/pricing/cost-import", tags=["Cost Imports"])
 
 
-async def _read_csv(file: UploadFile) -> bytes:
-    if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(415, "Envie um arquivo CSV.")
+async def _read_document(file: UploadFile) -> bytes:
+    if not file.filename or Path(file.filename).suffix.lower() not in ALLOWED_EXTENSIONS:
+        raise HTTPException(415, "Envie CSV, Excel, Word (.docx), PDF, TXT ou TSV.")
     data = await file.read(MAX_COST_IMPORT_BYTES + 1)
     await file.close()
     if len(data) > MAX_COST_IMPORT_BYTES:
-        raise HTTPException(413, "Arquivo maior que 8 MB.")
+        raise HTTPException(413, "Arquivo maior que 16 MB.")
     return data
 
 
@@ -29,9 +32,9 @@ async def preview(
     user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    data = await _read_csv(file)
+    data = await _read_document(file)
     try:
-        result = analyze_cost_import(db, user.id, data)
+        result = analyze_cost_import(db, user.id, data, file.filename or "")
     except CostImportError as error:
         raise HTTPException(422, str(error)) from error
     return {
@@ -51,8 +54,8 @@ async def apply(
     user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    data = await _read_csv(file)
+    data = await _read_document(file)
     try:
-        return apply_cost_import(db, user.id, data, preview_token_value)
+        return apply_cost_import(db, user.id, data, preview_token_value, file.filename or "")
     except CostImportError as error:
         raise HTTPException(422, str(error)) from error
