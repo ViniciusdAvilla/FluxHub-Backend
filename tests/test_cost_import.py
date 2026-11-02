@@ -226,6 +226,7 @@ def test_mlb_in_referencia_matches_exact_listing_owned_by_tenant(db):
 
 def test_document_excel_import_uses_precise_sku_and_preserves_positive_cost(db):
     from io import BytesIO
+    from decimal import Decimal
     from openpyxl import Workbook
     from app.services.cost_documents import parse_cost_document
 
@@ -246,7 +247,7 @@ def test_document_excel_import_uses_precise_sku_and_preserves_positive_cost(db):
     parsed = parse_cost_document(content, "base-precos.xlsx")
     assert len(parsed) == 2
     assert parsed[0].reference == "REF-A"
-    assert str(parsed[1].amount) == "24.90"
+    assert parsed[1].amount == Decimal("24.90")
     result = analyze_cost_import(db, 1, content, "base-precos.xlsx")
     assert result["ready"] == 1
     assert result["summary"]["sem_alteracao"] == 1
