@@ -28,7 +28,7 @@ Saldo e outros campos da planilha são ignorados. Preços ausentes, inválidos, 
 
 - O usuário só pode importar para anúncios registrados em sua própria conta FluxHub.
 - Um MLB explícito deve existir nos snapshots do vendedor autenticado.
-- Sem MLB, busca-se SKU exato (Referência ou Cód.Item) nos itens de pedidos sincronizados da mesma conta. Não há busca por semelhança ou associação entre vendedores.
+- Sem coluna MLB, busca-se SKU exato (Referência ou Cód.Item) nos itens de pedidos sincronizados da mesma conta. Um valor MLB válido no campo Referência ou Cód.Item pode corresponder diretamente ao identificador do anúncio do próprio vendedor. Não há busca por semelhança ou associação entre vendedores.
 - SKU apontando para vários anúncios: **ambíguo**, não atualizado automaticamente.
 - Duas linhas apontando ao mesmo anúncio: **duplicado**, ambas ignoradas.
 - Anúncios sem SKU nos itens de pedidos podem aparecer como **não encontrados**, mesmo existentes no catálogo. Inclua o MLB na planilha para associação direta.
