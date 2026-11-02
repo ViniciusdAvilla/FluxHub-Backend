@@ -10,7 +10,7 @@ import random
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from app.database.models import (
     CompanyDataSourceModel, MercadoLivreListingSnapshotModel as Listing,
@@ -24,6 +24,9 @@ LEASE_SECONDS = 600
 ORDERS_WINDOW_SECONDS = 30 * 24 * 60 * 60
 ORDERS_MAX_PAGE_WINDOW = 9000
 MAX_RETRIES = 5
+# Erros de rede não pausam o job definitivamente; após cinco tentativas,
+# a espera cresce até trinta minutos para proteger a API e o vendedor.
+MAX_RETRY_COOLDOWN = 1800
 SCROLL_MAX_AGE = timedelta(minutes=4)
 
 
@@ -36,7 +39,16 @@ def _claim_job() -> int | None:
         now = utcnow()
         job = db.scalar(
             select(Job).where(
-                Job.status.in_(("queued", "retry", "running")),
+                or_(
+                    Job.status.in_(("queued", "retry", "running")),
+                    # Migração suave dos jobs que o código antigo pausou
+                    # automaticamente após cinco erros 502. Uma pausa manual
+                    # continua fora desta condição.
+                    and_(
+                        Job.status == "paused",
+                        Job.last_error.like("Sincronização pausada após falhas repetidas%"),
+                    ),
+                ),
                 or_(Job.lease_until.is_(None), Job.lease_until < now),
                 or_(Job.retry_at.is_(None), Job.retry_at <= now),
             ).order_by(Job.updated_at, Job.id)
@@ -44,6 +56,16 @@ def _claim_job() -> int | None:
         )
         if job is None:
             return None
+
+        if job.status == "paused":
+            logger.warning(
+                "ml_sync_legacy_error_pause_resumed job_id=%s saved=%s",
+                job.id, job.listings_saved,
+            )
+            job.status = "queued"
+            job.retry_count = 0
+            job.retry_at = None
+            job.last_error = "Falha temporária antiga; retomando sem apagar os anúncios."
 
         # Mercado Livre scroll cursors expire quickly. If *all* API-reported
         # listings already exist in PostgreSQL and a page is repeatedly failing,
@@ -84,6 +106,8 @@ def _claim_job() -> int | None:
             job.scroll_updated_at is None
             or now - job.scroll_updated_at > SCROLL_MAX_AGE
         ):
+            logger.info("ml_sync_scan_cursor_expired job_id=%s saved=%s; rescanning without deleting products",
+                        job.id, job.listings_saved)
             job.scroll_id = None
             job.scroll_updated_at = None
 
@@ -182,6 +206,9 @@ async def process_one_sync_batch() -> bool:
                 orders_created_from=job.orders_window_start if job.phase == "orders" else None,
                 orders_created_to=job.orders_window_end if job.phase == "orders" else None,
                 prefetched_page=prefetched_page,
+                # Reduza apenas o lote de hidratação ao tentar novamente um 502.
+                # Os IDs da página já estão salvos em PostgreSQL e são os mesmos.
+                detail_batch_size=max(1, 20 // (2 ** min(job.retry_count, 5))),
             )
             if result.get("orders_unavailable"):
                 raise HTTPException(502, "Consulta de pedidos indisponível.")
@@ -236,8 +263,21 @@ async def process_one_sync_batch() -> bool:
             job.lease_until = None
             job.updated_at = utcnow()
             if job.phase == "listings":
-                job.scroll_id = result.get("next_scroll_id")
-                job.scroll_updated_at = (job.scroll_updated_at or utcnow()) if job.scroll_id else None
+                next_scroll_id = result.get("next_scroll_id")
+                # O cursor expira em aproximadamente cinco minutos no ML.
+                # Um lote que demorou demais não pode renovar artificialmente
+                # a validade do cursor; recomeçamos a leitura sem apagar dados.
+                if (next_scroll_id and job.scroll_updated_at and
+                    utcnow() - job.scroll_updated_at > SCROLL_MAX_AGE):
+                    logger.warning(
+                        "ml_sync_scan_cursor_expired_after_batch job_id=%s saved=%s",
+                        job.id, job.listings_saved,
+                    )
+                    job.scroll_id = None
+                    job.scroll_updated_at = None
+                else:
+                    job.scroll_id = next_scroll_id
+                    job.scroll_updated_at = job.scroll_updated_at if job.scroll_id else None
                 job.pending_listing_ids = None
                 job.pending_next_scroll_id = None
                 if not job.scroll_id:
@@ -294,24 +334,28 @@ async def process_one_sync_batch() -> bool:
             if status in (401, 403, 404, 422):
                 job.status = "failed"
                 job.last_error = "Conexão ou dados inválidos; confira a conta Mercado Livre."
-            elif status != 429 and job.retry_count >= MAX_RETRIES:
-                job.status = "paused"
-                job.last_error = ("Sincronização pausada após falhas repetidas; "
-                                  "os anúncios já salvos foram preservados.")
             else:
+                # 5xx, timeout e 429 são recuperáveis: não exigem nova
+                # autorização OAuth nem intervenção para recomeçar o job.
                 job.status = "retry"
                 delay = min(300, 2 ** min(job.retry_count, 8)) + random.uniform(0, 1)
+                if job.retry_count >= MAX_RETRIES and status != 429:
+                    delay = min(
+                        MAX_RETRY_COOLDOWN,
+                        60 * (2 ** min(job.retry_count - MAX_RETRIES, 5)),
+                    ) + random.uniform(0, 1)
                 if status == 429 and isinstance(exc, HTTPException):
                     retry_header = (exc.headers or {}).get("Retry-After", "")
                     if retry_header.isdecimal():
                         delay = max(delay, min(3600, int(retry_header)))
                 job.retry_at = utcnow() + timedelta(seconds=delay)
                 job.last_error = (
-                    "Limite temporário de requisições (429); retomada automática."
-                    if status == 429 else "Falha temporária na API; nova tentativa agendada."
+                    "Limite de consultas do Mercado Livre (429); retomada automática."
+                    if status == 429 else
+                    "Falha temporária do Mercado Livre; tentando novamente sem perder os dados."
                 )
-                # A staged page remains in PostgreSQL on failure. Do not
-                # advance or discard its cursor, and never zero the counters.
+                # A página pendente e os cursores permanecem persistidos.
+                # Nunca apagar registros nem zerar o progresso por um erro 502.
             db.commit()
     return True
 
