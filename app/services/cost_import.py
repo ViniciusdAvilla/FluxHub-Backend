@@ -178,9 +178,13 @@ def analyze_cost_import(db: Session, user_id: int, content: bytes) -> dict:
         else:
             by_ref = sku_map.get(row.reference, set()) if row.reference else set()
             by_code = sku_map.get(row.code, set()) if row.code else set()
-            matches = set(by_ref) | set(by_code)
+            # An MLB supplied as Referência (common in older ERP exports) is
+            # still an exact tenant-owned listing ID, not a fuzzy title match.
+            by_id = {key for key in (row.reference, row.code)
+                     if re.fullmatch(r"MLB\d+", key) and key in available}
+            matches = set(by_ref) | set(by_code) | by_id
             if matches:
-                result["match_type"] = "sku"
+                result["match_type"] = "mlb" if by_id and not (set(by_ref) | set(by_code)) else "sku"
         if len(matches) > 1:
             result["status"] = "ambiguo"
         elif not matches:
