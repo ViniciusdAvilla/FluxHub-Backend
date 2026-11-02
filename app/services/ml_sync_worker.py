@@ -63,7 +63,7 @@ def _claim_job() -> int | None:
                 job.id, job.listings_saved,
             )
             job.status = "queued"
-            job.retry_count = 0
+            # Preserve retry_count to start with smaller /items/bulk chunks.
             job.retry_at = None
             job.last_error = "Falha temporária antiga; retomando sem apagar os anúncios."
 
