@@ -2,9 +2,9 @@
 
 ## Objetivo
 
-Em **Precificação → Importar custos médios por CSV**, faça upload de um CSV sem alterar preços publicados no Mercado Livre. O valor da coluna **Preço Médio** é tratado exclusivamente como **custo unitário de compra**, armazenado na tabela mercado_livre_product_costs, campo unit_cost.
+Em **Precificação → Importar custos médios por CSV**, preencha exclusivamente os custos ainda ausentes, sem alterar preços publicados no Mercado Livre. O valor da coluna **Preço Médio** é tratado como **custo unitário de compra**, armazenado na tabela mercado_livre_product_costs, campo unit_cost. Um custo existente maior que zero é preservado, mesmo que o CSV traga valor diferente. Um registro sem custo ou com custo zero pode ser preenchido.
 
-A importação não altera preços publicados, estoques, impostos, comissões, fretes, outras despesas, fabricantes nem tokens OAuth.
+A importação não altera preços publicados, estoques, impostos, comissões, fretes, outras despesas, fabricantes nem tokens OAuth. Outras colunas do CSV são ignoradas.
 
 ## Formato
 
@@ -28,7 +28,7 @@ Saldo e outros campos da planilha são ignorados. Preços ausentes, inválidos, 
 
 - O usuário só pode importar para anúncios registrados em sua própria conta FluxHub.
 - Um MLB explícito deve existir nos snapshots do vendedor autenticado.
-- Sem MLB, busca-se SKU exato (Referência ou Cód.Item) nos itens de pedidos sincronizados da mesma conta. Não há busca por semelhança ou associação entre vendedores.
+- Sem coluna MLB, busca-se SKU exato (Referência ou Cód.Item) nos itens de pedidos sincronizados da mesma conta. Um valor MLB válido no campo Referência ou Cód.Item pode corresponder diretamente ao identificador do anúncio do próprio vendedor. Não há busca por semelhança ou associação entre vendedores.
 - SKU apontando para vários anúncios: **ambíguo**, não atualizado automaticamente.
 - Duas linhas apontando ao mesmo anúncio: **duplicado**, ambas ignoradas.
 - Anúncios sem SKU nos itens de pedidos podem aparecer como **não encontrados**, mesmo existentes no catálogo. Inclua o MLB na planilha para associação direta.
@@ -36,10 +36,10 @@ Saldo e outros campos da planilha são ignorados. Preços ausentes, inválidos, 
 ## Fluxo seguro
 
 1. Escolha o CSV e clique em **Conferir correspondências**.
-2. A prévia exibe prontos, sem alteração, não encontrados, ambíguos, duplicados e valores suspeitos.
-3. O servidor emite token assinado vinculado ao hash do arquivo, usuário, IDs, custos antigos e validade de 15 minutos.
+2. A prévia exibe apenas os custos ausentes prontos para preenchimento, custos já cadastrados (sempre preservados), não encontrados, ambíguos, duplicados e valores suspeitos.
+3. O servidor emite token assinado vinculado ao hash do arquivo, usuário, IDs, custos faltantes e validade de 15 minutos.
 4. **Confirmar custos** reenvia o mesmo CSV. O servidor verifica a assinatura e refaz a análise sob bloqueio; quando custos ou associações mudam, exige nova prévia (HTTP 409).
-5. Atualiza apenas custos elegíveis numa transação e preserva os demais campos. Reimportações idênticas são idempotentes.
+5. Preenche apenas custos ausentes numa transação e preserva os demais campos e todos os custos positivos existentes. Se algum custo for preenchido entre a prévia e a confirmação, a operação exige uma nova prévia. Reimportações idênticas não alteram nada.
 
 ## Publicação
 
@@ -49,4 +49,12 @@ Rotas autenticadas:
 - POST /api/v1/pricing/cost-import/preview (multipart file)
 - POST /api/v1/pricing/cost-import/apply (multipart file e preview_token)
 
-**A planilha anexada ao chat não é importada automaticamente no banco de produção.** Depois do deploy, selecione o CSV na tela de Precificação e confirme a prévia. Não publique o CSV de custos comerciais em repositórios públicos.
+**O CSV anexado ao chat não é enviado automaticamente ao banco de produção.** Depois do deploy do backend e frontend, selecione o CSV na tela de Precificação e confirme a prévia. Sem acesso autenticado ao banco de produção, não é possível verificar quantos custos faltam ou afirmar que foram gravados. Não publique o CSV de custos comerciais em repositórios.
+
+## Exemplo de arquivo analisado (30/10/2026)
+
+A planilha recebida tem 21.872 registros. Desses, 15.723 possuem preço médio acima de R$ 0,01 e 6.149 possuem zero ou R$ 0,01; esses últimos são ignorados automaticamente. O número realmente preenchido depende da correspondência exata do SKU/MLB e de quais custos já existiam no banco na hora da prévia. Não armazene a planilha no Git.
+
+## Consulta da dashboard
+
+A precificação busca os custos de compra em lotes paginados de até 10.000 registros, evitando o antigo corte silencioso de 1.000 custos na leitura financeira. A Visão Geral consulta os custos persistidos do usuário, exibe a cobertura de custos cadastrados e mantém os dados de vendas e anúncios separados. Os dados só aparecem após a gravação efetiva e a atualização da página.

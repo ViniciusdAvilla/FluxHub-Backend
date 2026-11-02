@@ -40,7 +40,7 @@ async def preview(
         "preview_limited": result["preview_limited"],
         "preview_token": preview_token(user.id, result),
         "file_sha": result["file_sha"],
-        "note": "Preço Médio será cadastrado apenas como custo unitário. Anúncios e estoques não serão alterados.",
+        "note": "Preço Médio preenche apenas custos de compra ausentes. Custos já registrados, preços anunciados e estoque serão preservados.",
     }
 
 

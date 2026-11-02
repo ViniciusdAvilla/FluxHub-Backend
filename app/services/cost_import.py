@@ -1,4 +1,4 @@
-"""Safe CSV-to-Mercado-Livre average *purchase cost* import.
+"""Fill missing Mercado-Livre average *purchase costs* from a CSV safely.
 
 Never updates selling prices or stock from Mercado Livre. Matching is exact:
 MLB identifier or seller SKU observed in the authenticated tenant's order lines.
@@ -178,9 +178,13 @@ def analyze_cost_import(db: Session, user_id: int, content: bytes) -> dict:
         else:
             by_ref = sku_map.get(row.reference, set()) if row.reference else set()
             by_code = sku_map.get(row.code, set()) if row.code else set()
-            matches = set(by_ref) | set(by_code)
+            # An MLB supplied as Referência (common in older ERP exports) is
+            # still an exact tenant-owned listing ID, not a fuzzy title match.
+            by_id = {key for key in (row.reference, row.code)
+                     if re.fullmatch(r"MLB\d+", key) and key in available}
+            matches = set(by_ref) | set(by_code) | by_id
             if matches:
-                result["match_type"] = "sku"
+                result["match_type"] = "mlb" if by_id and not (set(by_ref) | set(by_code)) else "sku"
         if len(matches) > 1:
             result["status"] = "ambiguo"
         elif not matches:
@@ -208,8 +212,10 @@ def analyze_cost_import(db: Session, user_id: int, content: bytes) -> dict:
         item["old_cost"] = old
         if item["status"] == "duplicado":
             continue
+        # Only fill missing costs. Any positive previously saved cost is immutable
+        # through the CSV importer, even when it differs from the spreadsheet.
         item["status"] = "sem_alteracao" if (
-            old is not None and Decimal(str(old)) == Decimal(str(item["new_cost"]))
+            old is not None and Decimal(str(old)) > 0
         ) else "atualizar"
         if item["status"] == "atualizar":
             changes.append((item["item_id"], str(item["new_cost"]), str(old) if old is not None else None))
@@ -269,7 +275,7 @@ def _signing_key() -> bytes:
 
 def preview_token(user_id: int, result: dict) -> str:
     data = {
-        "version": 1, "uid": user_id, "file": result["file_sha"],
+        "version": 2, "uid": user_id, "file": result["file_sha"],
         "fp": result["fingerprint"], "expiry": int(time.time()) + 900,
     }
     encoded = base64.urlsafe_b64encode(json.dumps(data, sort_keys=True,
@@ -289,11 +295,12 @@ def verify_token(user_id: int, content: bytes, provided: str, result: dict) -> N
         data = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
     except (ValueError, UnicodeDecodeError):
         raise HTTPException(400, "Prévia inválida; envie o arquivo novamente.") from None
-    if (data.get("uid") != user_id or data.get("file") != result["file_sha"]
+    if (data.get("version") != 2 or data.get("uid") != user_id
+        or data.get("file") != result["file_sha"]
         or data.get("fp") != result["fingerprint"] or data.get("expiry", 0) < time.time()):
         raise HTTPException(409, "Arquivo ou custos mudaram; refaça a prévia.")
     if result["ready"] < 1:
-        raise HTTPException(422, "Nenhum custo disponível para atualização.")
+        raise HTTPException(422, "Nenhum custo ausente disponível para preenchimento.")
 
 
 def apply_cost_import(db: Session, user_id: int, content: bytes, token: str) -> dict:
@@ -306,6 +313,7 @@ def apply_cost_import(db: Session, user_id: int, content: bytes, token: str) -> 
     current = {item_id: row for item_id, row in db.execute(select(Cost.external_id, Cost).where(
         Cost.user_id == user_id))}
     added = 0
+    filled_zero = 0
     for item_id, new_cost, _old in result["changes"]:
         cost = current.get(item_id)
         if cost is None:
@@ -315,13 +323,17 @@ def apply_cost_import(db: Session, user_id: int, content: bytes, token: str) -> 
                 tax_percent=0, shipping_cost=0, other_cost=0,
             ))
             added += 1
-        else:
+        elif cost.unit_cost is None or cost.unit_cost <= 0:
+            # Defensive check in addition to the signed preview / row locks.
             cost.unit_cost = float(new_cost)
+            filled_zero += 1
     db.commit()
+    filled = added + filled_zero
     return {
-        "updated": result["ready"], "new_cost_records": added,
+        "updated": filled, "filled": filled,
+        "new_cost_records": added, "filled_zero_costs": filled_zero,
         "unchanged": result["summary"]["sem_alteracao"],
         "not_matched": result["summary"]["nao_encontrado"],
-        "skipped": result["total"] - result["ready"] - result["summary"]["sem_alteracao"],
-        "message": "Custos médios atualizados; preços de venda e estoque do Mercado Livre preservados.",
+        "skipped": result["total"] - filled - result["summary"]["sem_alteracao"],
+        "message": "Custos ausentes preenchidos. Custos existentes, preços anunciados e estoques preservados.",
     }
