@@ -2,15 +2,15 @@
 
 ## Objetivo
 
-Em **Precificação → Importar custos médios por CSV**, preencha exclusivamente os custos ainda ausentes, sem alterar preços publicados no Mercado Livre. O valor da coluna **Preço Médio** é tratado como **custo unitário de compra**, armazenado na tabela mercado_livre_product_costs, campo unit_cost. Um custo existente maior que zero é preservado, mesmo que o CSV traga valor diferente. Um registro sem custo ou com custo zero pode ser preenchido.
+Em **Precificação → Importação de custos em massa**, preencha exclusivamente os custos ainda ausentes, sem alterar preços publicados no Mercado Livre. O valor da coluna **Preço Médio** é tratado como **custo unitário de compra**, armazenado na tabela mercado_livre_product_costs, campo unit_cost. Um custo existente maior que zero é preservado, mesmo que o documento traga valor diferente. Um registro sem custo ou com custo zero pode ser preenchido.
 
-A importação não altera preços publicados, estoques, impostos, comissões, fretes, outras despesas, fabricantes nem tokens OAuth. Outras colunas do CSV são ignoradas.
+A importação não altera preços publicados, estoques, impostos, comissões, fretes, outras despesas, fabricantes nem tokens OAuth. Outras colunas dos documentos são ignoradas.
 
 ## Formato
 
-Aceita CSV UTF-8 ou Windows-1252, separador ponto e vírgula (ou vírgula quando não há ponto e vírgula no cabeçalho), até **8 MB** e **30.000 linhas**.
+Aceita **CSV, TSV, TXT, Excel (.xlsx e .xls), Word (.docx) e PDF com texto selecionável**, até **16 MB** e **30.000 linhas de custo**. CSV aceita UTF-8 ou Windows-1252, separador ponto e vírgula (ou vírgula quando não há ponto e vírgula no cabeçalho). Excel e Word podem ter uma tabela com cabeçalho e colunas; em PDF e TXT também são aceitas linhas explícitas como `SKU: REF-123 | Custo de compra: R$ 52,50`. PDF digitalizado (imagem) exige OCR prévio; formatos antigos `.doc` e protegidos por senha não são suportados. Rejeita documentos comprimidos potencialmente perigosos e PDFs de mais de 250 páginas.
 
-Obrigatório: **Preço Médio**, mais pelo menos uma coluna:
+Obrigatório: **Preço Médio**, **Custo de compra** ou outra coluna explicitamente identificada como custo, mais pelo menos uma coluna:
 - **Referência** (preferencial, SKU do vendedor) ou **Cód.Item** (SKU alternativo);
 - **MLB** ou **ID Mercado Livre**, coluna opcional de associação direta.
 
@@ -22,7 +22,7 @@ Cód.Item;Descrição;Referência;Preço Médio;MLB
 ;Outro produto;;73,90;MLB123456789
 ~~~
 
-Saldo e outros campos da planilha são ignorados. Preços ausentes, inválidos, zero ou R$ 0,01 são sinalizados e ignorados. Identificadores preservam zeros iniciais, hífens e pontuação; nunca há correspondência por nome.
+Saldo, preço de venda e outros campos da planilha são ignorados; uma coluna genérica chamada **Preço** nunca é importada como custo. Preços ausentes, inválidos, zero ou R$ 0,01 são sinalizados e ignorados. Identificadores preservam zeros iniciais, hífens e pontuação; nunca há correspondência por nome.
 
 ## Associação dos registros
 
@@ -35,10 +35,10 @@ Saldo e outros campos da planilha são ignorados. Preços ausentes, inválidos, 
 
 ## Fluxo seguro
 
-1. Escolha o CSV e clique em **Conferir correspondências**.
+1. Escolha ou arraste um documento e clique em **Conferir prévia**.
 2. A prévia exibe apenas os custos ausentes prontos para preenchimento, custos já cadastrados (sempre preservados), não encontrados, ambíguos, duplicados e valores suspeitos.
 3. O servidor emite token assinado vinculado ao hash do arquivo, usuário, IDs, custos faltantes e validade de 15 minutos.
-4. **Confirmar custos** reenvia o mesmo CSV. O servidor verifica a assinatura e refaz a análise sob bloqueio; quando custos ou associações mudam, exige nova prévia (HTTP 409).
+4. **Confirmar importação em massa** reenvia o mesmo documento. O servidor verifica a assinatura e refaz a análise sob bloqueio; quando custos ou associações mudam, exige nova prévia (HTTP 409).
 5. Preenche apenas custos ausentes numa transação e preserva os demais campos e todos os custos positivos existentes. Se algum custo for preenchido entre a prévia e a confirmação, a operação exige uma nova prévia. Reimportações idênticas não alteram nada.
 
 ## Publicação
@@ -49,11 +49,15 @@ Rotas autenticadas:
 - POST /api/v1/pricing/cost-import/preview (multipart file)
 - POST /api/v1/pricing/cost-import/apply (multipart file e preview_token)
 
-**O CSV anexado ao chat não é enviado automaticamente ao banco de produção.** Depois do deploy do backend e frontend, selecione o CSV na tela de Precificação e confirme a prévia. Sem acesso autenticado ao banco de produção, não é possível verificar quantos custos faltam ou afirmar que foram gravados. Não publique o CSV de custos comerciais em repositórios.
+**Nenhum documento anexado ao chat é enviado automaticamente ao banco de produção.** Depois do deploy do backend e frontend, selecione o documento na tela de Precificação, revise as correspondências e confirme a prévia. Sem acesso autenticado ao banco de produção, não é possível verificar quantos custos faltam ou afirmar que foram gravados. Não publique documentos de custos comerciais em repositórios.
 
 ## Exemplo de arquivo analisado (30/10/2026)
 
 A planilha recebida tem 21.872 registros. Desses, 15.723 possuem preço médio acima de R$ 0,01 e 6.149 possuem zero ou R$ 0,01; esses últimos são ignorados automaticamente. O número realmente preenchido depende da correspondência exata do SKU/MLB e de quais custos já existiam no banco na hora da prévia. Não armazene a planilha no Git.
+
+## Interface
+
+A listagem de produtos e a área de indicadores mostram custos ausentes como `—`, sem links repetidos de importação por produto nem edição de custo pela linha. Os atalhos globais levam à importação em massa em Precificação. A calculadora de lucro por produto permanece disponível.
 
 ## Consulta da dashboard
 
