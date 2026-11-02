@@ -1108,3 +1108,51 @@ def test_catalog_aggregates_preserve_enabled_source_deduplication_and_unknown_st
     dashboard = c.get("/api/v1/dashboard", headers=headers)
     assert dashboard.status_code == 200, dashboard.text
     assert dashboard.json()["avg_original_price"] == 65.0
+
+
+def test_sold_totals_returns_only_owned_lifetime_quantities(client, monkeypatch):
+    """Quantidade acumulada real do Mercado Livre, sem misturar com os últimos 30 dias."""
+    from app.database.models import MercadoLivreListingSnapshotModel as Listing
+    from app.routers import product_performance
+
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    user_id = _connected_ml_account(Session)
+    with Session() as db:
+        db.add(Listing(
+            user_id=user_id, mercado_livre_user_id=34567,
+            external_id="MLB10101010", title="Anúncio do vendedor",
+            status="active", price=10.0,
+        ))
+        db.commit()
+
+    product_performance._SOLD_TOTAL_CACHE.clear()
+    calls = []
+    async def fake_items(db, account, path, params=None):
+        calls.append((path, params))
+        assert path == "/items/bulk"
+        assert params == {"ids": "MLB10101010"}
+        return [{
+            "id": "MLB10101010", "status_code": 200,
+            "body": {
+                "id": "MLB10101010", "seller_id": 34567,
+                "sold_quantity": 42,
+            },
+        }]
+    monkeypatch.setattr(product_performance, "seller_request", fake_items)
+    query = {"ids": "MLB10101010,MLB20202020"}
+    response = c.get("/api/v1/analytics/items/sold-totals",
+                     headers=headers, params=query)
+    assert response.status_code == 200, response.text
+    assert response.json() == [{
+        "account_id": 34567, "item_id": "MLB10101010",
+        "sold_lifetime": 42,
+    }]
+    response = c.get("/api/v1/analytics/items/sold-totals",
+                     headers=headers, params=query)
+    assert response.status_code == 200
+    assert len(calls) == 1  # cache por usuário + vendedor + anúncio
+
+    invalid = c.get("/api/v1/analytics/items/sold-totals",
+                    headers=headers, params={"ids": "MLB10101010,../../x"})
+    assert invalid.status_code == 422

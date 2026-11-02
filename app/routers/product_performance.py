@@ -1,5 +1,6 @@
 """Individual Mercado Livre listing metrics with tenant isolation and honest data provenance."""
 from datetime import date, timedelta, timezone, datetime
+from time import monotonic
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +18,11 @@ from app.routers.mercado_livre import get_account, seller_request
 router = APIRouter(prefix="/analytics/items", tags=["Analytics"])
 ITEM_ID = re.compile(r"^ML[A-Z]{1,2}[0-9]{5,20}$")
 
+# Dados do Mercado Livre são históricos por anúncio, sem relação com o
+# intervalo de 30 dias usado para calcular receita e margem do catálogo.
+_SOLD_TOTAL_CACHE: dict[tuple[int, int, str], tuple[float, int]] = {}
+_SOLD_TOTAL_TTL_SECONDS = 10 * 60
+
 
 def linked_account(db, user_id, item_id, account_id):
     if account_id is not None:
@@ -28,6 +34,81 @@ def linked_account(db, user_id, item_id, account_id):
     if len(ids) == 1:
         return get_account(db, user_id, ids.pop())
     return get_account(db, user_id, None)
+
+
+@router.get("/sold-totals")
+async def listing_sold_totals(
+    ids: str = Query(min_length=8, max_length=2500),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Vendas acumuladas dos anúncios autorizados, consultadas em lotes.
+
+    Não substituir este valor por vendas dos últimos 30 dias: esse intervalo
+    depende das linhas de pedidos pagos sincronizadas no banco.
+    """
+    requested = list(dict.fromkeys(ids.split(",")))
+    if not 1 <= len(requested) <= 100 or any(
+        ITEM_ID.fullmatch(item_id) is None for item_id in requested
+    ):
+        raise HTTPException(422, "Informe de 1 a 100 identificadores de anúncio válidos.")
+
+    owned = db.scalars(select(MercadoLivreListingSnapshotModel).where(
+        MercadoLivreListingSnapshotModel.user_id == user.id,
+        MercadoLivreListingSnapshotModel.external_id.in_(requested),
+    )).all()
+    account_items: dict[int, list[str]] = {}
+    for row in owned:
+        if row.mercado_livre_user_id is not None:
+            account_items.setdefault(row.mercado_livre_user_id, []).append(row.external_id)
+
+    results: list[dict[str, int | str]] = []
+    for account_id, item_ids in account_items.items():
+        missing = []
+        stamp = monotonic()
+        for item_id in dict.fromkeys(item_ids):
+            cached = _SOLD_TOTAL_CACHE.get((user.id, account_id, item_id))
+            if cached and cached[0] > stamp:
+                results.append({
+                    "account_id": account_id, "item_id": item_id,
+                    "sold_lifetime": cached[1],
+                })
+            else:
+                missing.append(item_id)
+        if not missing:
+            continue
+        account = get_account(db, user.id, account_id)
+        for offset in range(0, len(missing), 20):
+            chunk = missing[offset:offset + 20]
+            response = await seller_request(
+                db, account, "/items/bulk", {"ids": ",".join(chunk)}
+            )
+            if not isinstance(response, list):
+                raise HTTPException(502, "Vendas acumuladas indisponíveis no Mercado Livre.")
+            for listing in response:
+                if not isinstance(listing, dict):
+                    continue
+                body = listing.get("body")
+                item_id = listing.get("id")
+                code = listing.get("status_code", listing.get("code"))
+                if (item_id not in chunk or code != 200 or
+                    not isinstance(body, dict) or
+                    body.get("id") != item_id or
+                    body.get("seller_id") != account_id):
+                    continue
+                quantity = body.get("sold_quantity")
+                if type(quantity) is not int or not 0 <= quantity <= 1_000_000_000:
+                    continue
+                results.append({
+                    "account_id": account_id, "item_id": item_id,
+                    "sold_lifetime": quantity,
+                })
+                if len(_SOLD_TOTAL_CACHE) > 10000:
+                    _SOLD_TOTAL_CACHE.clear()
+                _SOLD_TOTAL_CACHE[(user.id, account_id, item_id)] = (
+                    monotonic() + _SOLD_TOTAL_TTL_SECONDS, quantity
+                )
+    return results
 
 
 @router.get("/{item_id}/performance")
