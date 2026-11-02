@@ -222,3 +222,121 @@ def test_mlb_in_referencia_matches_exact_listing_owned_by_tenant(db):
     assert result["filled"] == 1
     assert db.scalar(select(Cost.unit_cost).where(
         Cost.user_id == 1, Cost.external_id == "MLB003")) == 25.4
+
+
+def test_document_excel_import_uses_precise_sku_and_preserves_positive_cost(db):
+    from io import BytesIO
+    from openpyxl import Workbook
+    from app.services.cost_documents import parse_cost_document
+
+    book = Workbook()
+    sheet = book.active
+    sheet.append(["Relatório exportado do ERP"])
+    sheet.append(["Cód.Item", "Descrição", "Referência", "Preço de venda", "Preço Médio"])
+    sheet.append(["0001", "Filtro", "REF-A", 200.00, 99.99])  # existing cost unchanged
+    sheet.append(["0002", "Correia", "REF-C", 88.00, 24.90])
+    hidden = book.create_sheet("Antigos")
+    hidden.append(["MLB", "Preço Médio"])
+    hidden.append(["MLB002", 1.99])
+    hidden.sheet_state = "hidden"
+    file = BytesIO()
+    book.save(file)
+    content = file.getvalue()
+
+    parsed = parse_cost_document(content, "base-precos.xlsx")
+    assert len(parsed) == 2
+    assert parsed[0].reference == "REF-A"
+    assert str(parsed[1].amount) == "24.90"
+    result = analyze_cost_import(db, 1, content, "base-precos.xlsx")
+    assert result["ready"] == 1
+    assert result["summary"]["sem_alteracao"] == 1
+    applied = apply_cost_import(db, 1, content, preview_token(1, result), "base-precos.xlsx")
+    assert applied["updated"] == 1
+    assert db.scalar(select(Cost.unit_cost).where(
+        Cost.user_id == 1, Cost.external_id == "MLB001")) == 7.0
+    assert db.scalar(select(Cost.unit_cost).where(
+        Cost.user_id == 1, Cost.external_id == "MLB003")) == 24.90
+    assert db.scalar(select(Listing.price).where(
+        Listing.user_id == 1, Listing.external_id == "MLB003")) == 80.00
+
+
+def test_word_docx_table_and_plain_text_support():
+    from io import BytesIO
+    from docx import Document
+    from app.services.cost_documents import parse_cost_document
+
+    document = Document()
+    table = document.add_table(rows=1, cols=4)
+    for index, value in enumerate(["SKU", "Descrição", "Preço Médio", "Preço de venda"]):
+        table.rows[0].cells[index].text = value
+    row = table.add_row().cells
+    row[0].text = "REF-C"
+    row[1].text = "Correia"
+    row[2].text = "42,50"
+    row[3].text = "180,00"
+    file = BytesIO()
+    document.save(file)
+    records = parse_cost_document(file.getvalue(), "precos.docx")
+    assert len(records) == 1
+    assert records[0].reference == "REF-C"
+    assert str(records[0].amount) == "42.50"
+
+    document = Document()
+    document.add_paragraph("SKU: REF-C | Custo de compra: R$ 29,25")
+    file = BytesIO()
+    document.save(file)
+    records = parse_cost_document(file.getvalue(), "precos.docx")
+    assert str(records[0].amount) == "29.25"
+
+
+def test_pdf_text_and_xls_are_supported():
+    from io import BytesIO
+    from reportlab.pdfgen import canvas
+    from app.services.cost_documents import parse_cost_document
+    import xlwt
+
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer)
+    pdf.drawString(40, 780, "SKU: REF-C | Custo de compra: R$ 25,90")
+    pdf.save()
+    rows = parse_cost_document(buffer.getvalue(), "custos.pdf")
+    assert len(rows) == 1
+    assert rows[0].reference == "REF-C"
+    assert str(rows[0].amount) == "25.90"
+
+    book = xlwt.Workbook()
+    sheet = book.add_sheet("Precos")
+    for col, cell in enumerate(("MLB", "Custo de compra", "Preco de venda")):
+        sheet.write(0, col, cell)
+    sheet.write(1, 0, "MLB003")
+    sheet.write(1, 1, 19.80)
+    sheet.write(1, 2, 100.00)
+    output = BytesIO()
+    book.save(output)
+    rows = parse_cost_document(output.getvalue(), "custos.xls")
+    assert rows[0].mlb == "MLB003"
+    assert str(rows[0].amount) == "19.8"
+
+
+def test_document_rejects_sale_price_only_and_invalid_files():
+    from app.services.cost_documents import parse_cost_document
+
+    with pytest.raises(CostImportError, match="Nenhum custo"):
+        parse_cost_document(b"SKU;Preco\nREF-C;500\n", "vendas.csv")
+    with pytest.raises(CostImportError, match="Formato"):
+        parse_cost_document(b"SKU;Custo\nREF-C;15\n", "precos.exe")
+    with pytest.raises(CostImportError, match="PDF inv"):
+        parse_cost_document(b"not-a-real-pdf", "precos.pdf")
+    with pytest.raises(CostImportError, match="Excel/Word inv"):
+        parse_cost_document(b"not-a-real-docx", "precos.docx")
+    with pytest.raises(CostImportError, match="16 MB"):
+        parse_cost_document(b"X" * (16 * 1024 * 1024 + 1), "large.csv")
+
+
+def test_text_file_explicit_cost_pairs_only():
+    from app.services.cost_documents import parse_cost_document
+    text = "sku: ref-c | custo de compra: R$ 35,40\nsku: ref-a | preco de venda: 90,00"
+    rows = parse_cost_document(text.encode(), "custos.txt")
+    assert len(rows) == 1
+    assert rows[0].reference == "REF-C"
+    assert str(rows[0].amount) == "35.40"
