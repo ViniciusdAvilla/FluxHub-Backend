@@ -343,6 +343,8 @@ def test_sync_scans_more_than_1000_items_and_paginates_orders_separately(client,
                 "results": all_ids[start:end],
                 "scroll_id": f"cursor-{page + 1}" if end < total_items else None,
             }
+        if "items_visits/time_window" in path:
+            return {"results": []}
         if path == "/items/bulk":
             ids = params["ids"].split(",")
             bulk_sizes.append(len(ids))
@@ -1156,3 +1158,147 @@ def test_sold_totals_returns_only_owned_lifetime_quantities(client, monkeypatch)
     invalid = c.get("/api/v1/analytics/items/sold-totals",
                     headers=headers, params={"ids": "MLB10101010,../../x"})
     assert invalid.status_code == 422
+
+
+
+def test_sync_worker_retries_502_with_smaller_batches_without_losing_oauth(client, monkeypatch):
+    """Após várias falhas 502 o job continua recuperável, sem desconectar vendedor."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from fastapi import HTTPException
+    from app.database.models import (
+        MercadoLivreConnectionModel as Connection,
+        MercadoLivreSyncJobModel as Job,
+        MercadoLivreListingSnapshotModel as Listing,
+    )
+    from app.services import ml_sync_worker as worker
+
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    user_id = _connected_ml_account(Session)
+    with Session() as db:
+        connection = db.scalar(select(Connection).where(Connection.user_id == user_id))
+        original_refresh_token = connection.refresh_token_encrypted
+
+    started = c.post("/api/v1/analytics/sync-jobs",
+                     headers=headers, params={"account_id": 34567})
+    assert started.status_code == 202
+    scan_calls = []
+    bulk_sizes = []
+
+    async def unstable_api(db, account, path, params=None):
+        if path.endswith("/items/search"):
+            scan_calls.append(1)
+            return {"results": ["MLB11111", "MLB22222"],
+                    "scroll_id": None, "paging": {"total": 2}}
+        if "items_visits/time_window" in path:
+            return {"results": []}
+        if path == "/items/bulk":
+            ids = params["ids"].split(",")
+            bulk_sizes.append(len(ids))
+            if len(bulk_sizes) <= 5:
+                raise HTTPException(502, "Falha temporária de testes.")
+            return [{"status_code": 200, "body": {
+                "id": item_id, "seller_id": 34567, "title": item_id,
+                "status": "active", "price": 49.9,
+                "category_id": "MLB63517", "available_quantity": 1,
+                "attributes": [],
+            }} for item_id in ids]
+        raise AssertionError(path)
+
+    monkeypatch.setattr("app.routers.analytics.seller_request", unstable_api)
+    monkeypatch.setattr(worker, "SessionLocal", Session)
+    for attempt in range(5):
+        assert asyncio.run(worker.process_one_sync_batch()) is True
+        with Session() as db:
+            job = db.scalar(select(Job).where(Job.user_id == user_id))
+            assert job.status == "retry"
+            assert job.retry_count == attempt + 1
+            assert job.pending_listing_ids == ["MLB11111", "MLB22222"]
+            assert job.retry_at is not None
+            job.retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            db.commit()
+
+    assert asyncio.run(worker.process_one_sync_batch()) is True
+    with Session() as db:
+        job = db.scalar(select(Job).where(Job.user_id == user_id))
+        connection = db.scalar(select(Connection).where(Connection.user_id == user_id))
+        assert job.status == "queued"
+        assert job.phase == "orders"
+        assert job.listings_saved == 2
+        assert job.retry_count == 0
+        assert db.query(Listing).filter(Listing.user_id == user_id).count() == 2
+        assert connection.refresh_token_encrypted == original_refresh_token
+    assert len(scan_calls) == 1  # nenhuma nova paginação antes do lote pendente
+    assert bulk_sizes[0] == 2
+    assert bulk_sizes[-1] == 1  # reprocessamento de anúncios isolados
+
+
+def test_legacy_auto_paused_502_resumes_but_manual_pause_remains(client, monkeypatch):
+    """Somente pausa legada por falha temporária é automaticamente retomada."""
+    import asyncio
+    from app.database.models import MercadoLivreSyncJobModel as Job
+    from app.services import ml_sync_worker as worker
+
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    user_id = _connected_ml_account(Session)
+    assert c.post("/api/v1/analytics/sync-jobs", headers=headers,
+                  params={"account_id": 34567}).status_code == 202
+    with Session() as db:
+        job = db.scalar(select(Job).where(Job.user_id == user_id))
+        job.status = "paused"
+        job.last_error = ("Sincronização pausada após falhas repetidas; "
+                          "os anúncios já salvos foram preservados.")
+        job.retry_count = 5
+        job.pending_listing_ids = ["MLB33333"]
+        job.pending_next_scroll_id = None
+        db.commit()
+
+    async def fake_bulk(db, account, path, params=None):
+        if "items_visits/time_window" in path:
+            return {"results": []}
+        assert path == "/items/bulk"
+        return [{"status_code": 200, "body": {
+            "id": "MLB33333", "seller_id": 34567, "title": "Recuperado",
+            "status": "active", "price": 20,
+            "category_id": "MLB63517", "available_quantity": 1,
+            "attributes": [],
+        }}]
+
+    monkeypatch.setattr("app.routers.analytics.seller_request", fake_bulk)
+    monkeypatch.setattr(worker, "SessionLocal", Session)
+    assert asyncio.run(worker.process_one_sync_batch()) is True
+    with Session() as db:
+        job = db.scalar(select(Job).where(Job.user_id == user_id))
+        assert job.phase == "orders"
+        assert job.listings_saved == 1
+        job.status = "paused"
+        job.last_error = "Pausada manualmente pelo usuário."
+        db.commit()
+    assert asyncio.run(worker.process_one_sync_batch()) is False
+
+
+def test_orders_only_can_recover_an_expired_running_lease(client):
+    """Um lease morto não impede sincronizar pedidos da conta conectada."""
+    from datetime import datetime, timedelta, timezone
+    from app.database.models import MercadoLivreSyncJobModel as Job
+
+    c, Session = client
+    headers = login(c, "admin@example.com", "AdminPassw0rd!")
+    _connected_ml_account(Session)
+    assert c.post("/api/v1/analytics/sync-jobs", headers=headers,
+                  params={"account_id": 34567}).status_code == 202
+    with Session() as db:
+        job = db.scalar(select(Job))
+        job.status = "running"
+        job.phase = "listings"
+        job.lease_until = datetime.now(timezone.utc) - timedelta(minutes=2)
+        db.commit()
+    response = c.post("/api/v1/analytics/sync-jobs/34567/orders", headers=headers)
+    assert response.status_code == 202, response.text
+    assert response.json()["phase"] == "orders"
+    assert response.json()["status"] == "queued"
+    status = c.get("/api/v1/analytics/sync-jobs/34567", headers=headers)
+    assert status.status_code == 200
+    assert status.json()["worker_active"] is False  # fixture desativa worker

@@ -1,7 +1,7 @@
 """Authenticated, tenant-isolated durable sync job operations."""
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -62,8 +62,10 @@ def start_sync_job(
         job = Job(user_id=user.id, mercado_livre_user_id=account.mercado_livre_user_id)
         db.add(job)
     elif job.status == "paused":
-        # Explicit resume: preserve staged IDs and saved progress.
+        # Explicit resume: preserve staged IDs, OAuth e dados já salvos.
         job.status = "queued"
+        job.retry_count = 0
+        job.last_error = None
         job.retry_at = None
         job.lease_until = None
     elif job.status not in ("queued", "running", "retry"):
@@ -103,6 +105,7 @@ def start_sync_job(
 @router.get("/{account_id}")
 def sync_job_status(
     account_id: int,
+    request: Request,
     user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -112,14 +115,15 @@ def sync_job_status(
     job = db.scalar(select(Job).where(
         Job.user_id == user.id,
         Job.mercado_livre_user_id == account.mercado_livre_user_id))
+    worker_active = bool(getattr(request.app.state, "ml_sync_worker_active", False))
     if not job:
-        return {"account_id": account_id, "status": "idle", "phase": None,
+        return {"account_id": account_id, "worker_active": worker_active, "status": "idle", "phase": None,
                 "listings_scanned": 0, "listings_total": None, "listings_saved": 0, "orders_saved": 0,
                 "pages_done": 0, "retry_count": 0, "last_error": None,
                 "orders_window_start": None, "orders_window_end": None, "orders_until": None,
                 "retry_at": None, "updated_at": None, "started_at": None,
                 "completed_at": None}
-    return _serialize(job)
+    return {**_serialize(job), "worker_active": worker_active}
 
 
 
@@ -141,6 +145,7 @@ def pause_sync_job(
         raise HTTPException(404, "Sincronização não encontrada.")
     if job.status in ("queued", "running", "retry", "paused"):
         job.status = "paused"
+        job.last_error = "Pausada manualmente pelo usuário."
         job.lease_until = None
         job.retry_at = None
         job.updated_at = datetime.now(timezone.utc)
@@ -175,7 +180,11 @@ def start_orders_only_job(
         job = Job(user_id=user.id, mercado_livre_user_id=account.mercado_livre_user_id)
         db.add(job)
     elif job.status == "running":
-        raise HTTPException(409, "Aguarde o lote atual ou pause antes de atualizar pedidos.")
+        # O worker pode ter morrido sem liberar um lease antigo. Nesse caso
+        # permitir sincronizar pedidos sem desconectar a conta do vendedor.
+        stamp = datetime.now(timezone.utc)
+        if job.lease_until is not None and job.lease_until > stamp:
+            raise HTTPException(409, "O lote atual ainda está processando; aguarde sua conclusão.")
     job.status = "queued"
     job.phase = "orders"
     job.pending_listing_ids = None

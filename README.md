@@ -252,6 +252,24 @@ FROM mercado_livre_sync_jobs
 ORDER BY updated_at DESC;
 ```
 
+O status inclui `worker_active`: `false` indica que o processador não
+foi inicializado (por exemplo `SYNC_WORKER_ENABLED=false` ou falha na
+migração aditiva). Nessa situação a conta pode permanecer conectada, mas
+nenhum job avança até o serviço voltar a funcionar.
+
+Falhas temporárias HTTP 502/429 permanecem em `retry`, com horário
+`retry_at` e retentativas automáticas. O lote de anúncios com falha fica
+registrado em `pending_listing_ids`; nas próximas tentativas a consulta
+em lote é reduzida progressivamente, sem apagar anúncios já importados.
+Pausas solicitadas pelo usuário permanecem pausadas. Jobs que uma versão
+antiga pausou exclusivamente após cinco falhas temporárias são recuperados
+automaticamente após o deploy.
+
+**Não é necessário desconectar nem refazer a autorização OAuth para
+retomar a sincronização.** Caso a API retorne erro de autorização real
+(401/403), o job sinaliza `failed` e a conexão continua preservada para
+diagnóstico. Nenhum dado é substituído por valores fictícios.
+
 `completed` significa que foram percorridos os anúncios e pedidos
 **disponíveis para o aplicativo e vendedor na API**. A própria documentação
 Mercado Livre estabelece disponibilidade de pedidos de até 12 meses e
