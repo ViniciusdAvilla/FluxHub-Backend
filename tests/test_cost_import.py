@@ -210,3 +210,15 @@ def test_erp_csv_ignores_other_columns_and_placeholder_prices():
     assert rows[1].code == "47522"
     assert rows[1].reference == "CONV-001-47522"
     assert rows[1].amount == 42.45
+
+
+def test_mlb_in_referencia_matches_exact_listing_owned_by_tenant(db):
+    file = _file(["003;Correia;MLB003;1;25,40;5"])
+    preview = analyze_cost_import(db, 1, file)
+    assert preview["ready"] == 1
+    assert preview["rows"][0]["item_id"] == "MLB003"
+    assert preview["rows"][0]["match_type"] == "mlb"
+    result = apply_cost_import(db, 1, file, preview_token(1, preview))
+    assert result["filled"] == 1
+    assert db.scalar(select(Cost.unit_cost).where(
+        Cost.user_id == 1, Cost.external_id == "MLB003")) == 25.4
