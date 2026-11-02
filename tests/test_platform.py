@@ -1191,6 +1191,8 @@ def test_sync_worker_retries_502_with_smaller_batches_without_losing_oauth(clien
             scan_calls.append(1)
             return {"results": ["MLB11111", "MLB22222"],
                     "scroll_id": None, "paging": {"total": 2}}
+        if "items_visits/time_window" in path:
+            return {"results": []}
         if path == "/items/bulk":
             ids = params["ids"].split(",")
             bulk_sizes.append(len(ids))
