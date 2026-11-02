@@ -75,9 +75,11 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(run_sync_worker()) if (
         settings.sync_worker_enabled and schema_ready
     ) else None
+    app.state.ml_sync_worker_active = task is not None
     try:
         yield
     finally:
+        app.state.ml_sync_worker_active = False
         if task:
             task.cancel()
             try:
