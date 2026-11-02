@@ -209,7 +209,7 @@ def test_erp_csv_ignores_other_columns_and_placeholder_prices():
     assert rows[0].issue == "revisar_valor"
     assert rows[1].code == "47522"
     assert rows[1].reference == "CONV-001-47522"
-    assert rows[1].amount == 42.45
+    assert str(rows[1].amount) == "42.45"
 
 
 def test_mlb_in_referencia_matches_exact_listing_owned_by_tenant(db):
