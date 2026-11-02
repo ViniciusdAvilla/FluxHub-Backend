@@ -382,6 +382,7 @@ async def _sync_batch(
     orders_created_from: datetime | None = None,
     orders_created_to: datetime | None = None,
     prefetched_page: dict | None = None,
+    detail_batch_size: int = 20,
 ):
     """Persist one bounded batch. Scan+scroll retrieves listings beyond the 1000-offset cap.
 
@@ -448,8 +449,10 @@ async def _sync_batch(
     # /items/bulk returns a status PER ITEM. A permanently removed listing
     # (404/410) must not poison a complete page or block all seller orders.
     # Transient failures and incomplete responses still retry the staged IDs.
-    for start in range(0, len(detail_ids), 20):
-        chunk = detail_ids[start:start + 20]
+    if not 1 <= detail_batch_size <= 20:
+        raise HTTPException(422, "Tamanho de lote inválido.")
+    for start in range(0, len(detail_ids), detail_batch_size):
+        chunk = detail_ids[start:start + detail_batch_size]
         data = await seller_request(db, account, "/items/bulk", {"ids": ",".join(chunk)})
         if not isinstance(data, list):
             raise HTTPException(502, "Detalhes de anúncios inválidos.")
