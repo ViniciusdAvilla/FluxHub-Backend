@@ -1,4 +1,4 @@
-"""Fill missing Mercado-Livre average *purchase costs* from a CSV safely.
+"""Fill missing Mercado-Livre average *purchase costs* from business documents.
 
 Never updates selling prices or stock from Mercado Livre. Matching is exact:
 MLB identifier or seller SKU observed in the authenticated tenant's order lines.
@@ -28,7 +28,7 @@ from app.database.models import (
     MercadoLivreProductCostModel as Cost,
 )
 
-MAX_COST_IMPORT_BYTES = 8 * 1024 * 1024
+MAX_COST_IMPORT_BYTES = 16 * 1024 * 1024
 MAX_COST_IMPORT_ROWS = 30000
 MAX_PREVIEW_ROWS = 100
 MONEY_CAP = Decimal("1000000000.00")
@@ -80,7 +80,7 @@ def _money(value: str) -> Decimal:
 
 def parse_csv(content: bytes) -> list[CostCsvRow]:
     if not content or len(content) > MAX_COST_IMPORT_BYTES:
-        raise CostImportError("CSV vazio ou maior que 8 MB.")
+        raise CostImportError("CSV vazio ou maior que 16 MB.")
     try:
         raw = content.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -153,8 +153,11 @@ def _sku_map(db: Session, user_id: int, wanted: set[str],
     return mapping
 
 
-def analyze_cost_import(db: Session, user_id: int, content: bytes) -> dict:
-    rows = parse_csv(content)
+def analyze_cost_import(db: Session, user_id: int, content: bytes,
+                        filename: str = "arquivo.csv") -> dict:
+    # Local import avoids a cycle with shared CSV identity and money rules.
+    from app.services.cost_documents import parse_cost_document
+    rows = parse_cost_document(content, filename)
     available = _current_catalog(db, user_id)
     wanted = {key for row in rows for key in (row.reference, row.code) if key}
     sku_map = _sku_map(db, user_id, wanted, available)
@@ -303,12 +306,13 @@ def verify_token(user_id: int, content: bytes, provided: str, result: dict) -> N
         raise HTTPException(422, "Nenhum custo ausente disponível para preenchimento.")
 
 
-def apply_cost_import(db: Session, user_id: int, content: bytes, token: str) -> dict:
+def apply_cost_import(db: Session, user_id: int, content: bytes, token: str,
+                      filename: str = "arquivo.csv") -> dict:
     # Serialize concurrent imports for a tenant before rechecking the preview.
     if db.bind is not None and db.bind.dialect.name == "postgresql":
         db.execute(text("SELECT pg_advisory_xact_lock(:id)"), {"id": 8934700000 + user_id})
     db.execute(select(Cost.id).where(Cost.user_id == user_id).with_for_update()).all()
-    result = analyze_cost_import(db, user_id, content)
+    result = analyze_cost_import(db, user_id, content, filename)
     verify_token(user_id, content, token, result)
     current = {item_id: row for item_id, row in db.execute(select(Cost.external_id, Cost).where(
         Cost.user_id == user_id))}
