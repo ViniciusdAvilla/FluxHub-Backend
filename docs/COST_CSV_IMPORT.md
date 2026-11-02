@@ -54,3 +54,7 @@ Rotas autenticadas:
 ## Exemplo de arquivo analisado (30/10/2026)
 
 A planilha recebida tem 21.872 registros. Desses, 15.723 possuem preço médio acima de R$ 0,01 e 6.149 possuem zero ou R$ 0,01; esses últimos são ignorados automaticamente. O número realmente preenchido depende da correspondência exata do SKU/MLB e de quais custos já existiam no banco na hora da prévia. Não armazene a planilha no Git.
+
+## Consulta da dashboard
+
+A precificação busca os custos de compra em lotes paginados de até 10.000 registros, evitando o antigo corte silencioso de 1.000 custos na leitura financeira. A Visão Geral consulta os custos persistidos do usuário, exibe a cobertura de custos cadastrados e mantém os dados de vendas e anúncios separados. Os dados só aparecem após a gravação efetiva e a atualização da página.
