@@ -130,7 +130,9 @@ async def send_message(
     entries = thread.get("messages", []) if isinstance(thread, dict) else []
     if not entries:
         raise HTTPException(409, "Sem conversa iniciada pelo comprador.")
-    site = str(thread.get("site_id") or "MLB")
+    site = str(thread.get("site_id") or next(
+        (entry.get("site_id") for entry in entries if isinstance(entry, dict)
+         and entry.get("site_id")), ""))
     if site not in AGENTS:
         raise HTTPException(422, "País da conversa não suportado.")
     return await ml_request(db, account, "POST",
