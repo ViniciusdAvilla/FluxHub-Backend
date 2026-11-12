@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     mercado_livre_redirect_uri: str = (
         "https://myfluxhub.tech/api/v1/connectors/mercado-livre/callback"
     )
+    # Google Shopping credentials only in the private FastAPI environment.
+    serpapi_key: SecretStr | None = None
     # Optional: manual support works without this key.
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-4.1-mini"
