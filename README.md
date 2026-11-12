@@ -289,3 +289,11 @@ Veja [o inventário de rotas e a política de compatibilidade](docs/BACKEND_CLEA
 
 Dependências de produção: `pip install -r requirements.txt`.
 Testes e CI: `pip install -r requirements-dev.txt`.
+
+## SerpAPI — pesquisa de concorrentes no Raio-X
+
+Configure `SERPAPI_KEY` somente no ambiente privado do **FastAPI** (arquivo `.env` não versionado ou variável do serviço systemd). O Next.js não precisa dessa chave e não deve receber uma cópia.
+
+A integração expõe `GET /api/v1/market/providers` para verificar disponibilidade e `POST /api/v1/market/google-shopping` com JSON `{ "query": "nome do produto" }`. Ambas as rotas exigem o token de serviço do backend **e** um JWT de usuário FluxHub válido. A resposta de busca devolve apenas os campos públicos de até 60 anúncios, sem informações de autenticação da SerpAPI. A pesquisa usa `google_shopping`, `gl=br` e `hl=pt-br`.
+
+Após configurar a chave no serviço FastAPI, reinicie `fluxhub-backend`; publique a versão do frontend que consulta essas rotas e reinicie `fluxhub-frontend`. Consulte o Raio-X com usuário autenticado. Erros de SerpAPI não devem mostrar preços fictícios, e nenhuma chave deve ser exposta em respostas ou logs.
