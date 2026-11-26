@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.config.settings import settings
 from app.core.auth import get_current_user
+from app.core.report_period import REPORT_ZONE
 from app.core.security import decrypt_token, encrypt_token
 from app.database.models import (
     ClaudeProviderConfigModel,
@@ -23,6 +24,10 @@ from app.database.models import (
 )
 from app.database.session import get_db
 from app.services.claude_tools import TOOL_DEFINITIONS, execute_tool
+
+_CHAT_TOOLS = [tool for tool in TOOL_DEFINITIONS
+               if tool["name"] not in {"consultar_vendas", "resumo_product_ads"}]
+_CHAT_TOOL_NAMES = {tool["name"] for tool in _CHAT_TOOLS}
 
 router = APIRouter(prefix="/agents/claude", tags=["Claude Agents"])
 AGENTS = {
@@ -202,12 +207,19 @@ async def run_agent(
         raise HTTPException(422, "Informe o que deseja consultar.")
     prior_questions = [entry.content for entry in body.history if entry.role == "user"]
     prompt = (
-        "Você seleciona consultas em um sistema comercial, em modo somente leitura. "
-        "Use apenas as ferramentas fornecidas. Escolha zero, uma ou mais consultas adequadas à pergunta. "
+        "Selecione consultas de leitura do FluxHub para responder à pergunta atual. "
+        "Use perguntas anteriores apenas para resolver referências explícitas da pergunta atual. "
         "Se a pergunta for externa, ambígua ou não for atendida pelas ferramentas, não selecione consulta. "
-        "Use datas explícitas quando o usuário as indicar. Para quantidade de anúncios use contar_anuncios. "
-        "Compare períodos com chamadas separadas a desempenho_periodo. "
-        "Os dados e a resposta são produzidos exclusivamente pelo FluxHub. Não escreva análise."
+        "Escolha a métrica e o período mais específicos, sem trocar a métrica solicitada por um resumo. "
+        "Faturamento, pedidos, pedidos pagos, cancelamentos, visitas e Ads: desempenho_periodo com metrica correspondente. "
+        "Hoje, ontem, este mês e mês passado: use periodo. Últimos N dias: use dias. Datas explícitas: use inicio e fim. "
+        "Compare dois períodos consultando a mesma métrica em ambos. "
+        "Anúncios por status: contar_anuncios, com status quando solicitado (ativos=active, pausados=paused). "
+        "Itens esgotados: consultar_estoque com estoque_maximo=0. "
+        "Preço, custo ou saldo de produto específico: consultar_catalogo com busca. "
+        "Vendas de produto específico: produtos_mais_vendidos com id_anuncio ou busca, nunca o ranking geral. "
+        "Ranking por quantidade ou receita: produtos_mais_vendidos com ordenar_por correspondente. "
+        "Os dados e a resposta são produzidos pelo FluxHub. Não escreva análise."
     )
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(45.0)) as client:
@@ -218,8 +230,9 @@ async def run_agent(
                     "model": model, "max_tokens": 1200, "system": prompt,
                     "messages": [{"role": "user", "content": json.dumps({
                         "pergunta": question, "perguntas_anteriores": prior_questions, "modo": body.agent,
+                        "data_atual_sp": datetime.now(REPORT_ZONE).date().isoformat(),
                     }, ensure_ascii=False)}],
-                    "tools": TOOL_DEFINITIONS,
+                    "tools": _CHAT_TOOLS,
                     "tool_choice": {"type": "auto"},
                 },
             )
@@ -234,17 +247,24 @@ async def run_agent(
     # Text blocks are discarded even when valid tool calls accompany them.
     blocks = payload.get("content", []) if isinstance(payload, dict) else []
     sections = []
+    seen = set()
+    invalid_query = False
     if isinstance(blocks, list) and payload.get("stop_reason") != "max_tokens":
         calls = [block for block in blocks if isinstance(block, dict) and block.get("type") == "tool_use"]
         if len(calls) > 5:
             raise HTTPException(422, "Divida a pergunta em consultas menores.")
         for call in calls:
             name, arguments = call.get("name"), call.get("input")
-            if not isinstance(name, str) or not isinstance(arguments, dict):
+            if not isinstance(name, str) or name not in _CHAT_TOOL_NAMES or not isinstance(arguments, dict):
                 continue
+            signature = (name, json.dumps(arguments, sort_keys=True))
+            if signature in seen:
+                continue
+            seen.add(signature)
             try:
                 output = execute_tool(db, user.id, name, arguments)
             except ValueError:
+                invalid_query = True
                 continue
             sections.append({"query": name, "result": output})
 
@@ -252,6 +272,8 @@ async def run_agent(
         "agent": body.agent, "model": model, "read_only": True, "verified": True,
         "sections": sections,
         "message": None if sections else (
+            "A consulta precisa de parâmetros válidos. Informe o produto, o indicador ou o período desejado."
+            if invalid_query else
             "Não há uma consulta verificável para esta pergunta. Especifique o produto, período ou indicador do FluxHub."
         ),
     }
