@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
+from app.core.report_period import REPORT_ZONE, date_filters, timestamp_filters
 from app.database.models import (
     UserModel, CompanyDataSourceModel, ProductModel, MercadoLivreConnectionModel,
     MercadoLivreListingSnapshotModel as Listing,
@@ -157,6 +158,8 @@ def list_costs(limit: int = Query(default=500, ge=1, le=10000),
 @router.get("/catalog-metrics")
 def catalog_metrics(
     days: int = Query(default=30, ge=1, le=365),
+    start_date: date | None = None,
+    end_date: date | None = None,
     account_id: int | None = Query(default=None, ge=1),
     user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -173,7 +176,6 @@ def catalog_metrics(
     if account_id is not None and account_id not in connected_accounts:
         raise HTTPException(403, "Conta Mercado Livre não pertence ao usuário.")
 
-    cutoff = now() - timedelta(days=days)
     line_match = and_(
         OrderLine.user_id == Order.user_id,
         OrderLine.mercado_livre_user_id == Order.mercado_livre_user_id,
@@ -183,7 +185,7 @@ def catalog_metrics(
         Order.user_id == user.id,
         Order.status == "paid",
         Order.is_cancelled.is_(False),
-        Order.created_at >= cutoff,
+        *timestamp_filters(Order.created_at, days, start_date, end_date),
     ]
     if account_id is not None:
         paid_filters.append(Order.mercado_livre_user_id == account_id)
@@ -236,7 +238,7 @@ def catalog_metrics(
         func.sum(Ads.attributed_revenue),
     ).where(
         Ads.user_id == user.id,
-        Ads.report_date >= cutoff.date(),
+        *date_filters(Ads.report_date, days, start_date, end_date),
     )
     if account_id is not None:
         ads_stmt = ads_stmt.where(Ads.mercado_livre_user_id == account_id)
@@ -755,6 +757,9 @@ def ads_performance(
 @router.get("/order-status")
 def order_status_summary(
     days: int = Query(default=30, ge=1, le=365),
+    start_date: date | None = None,
+    end_date: date | None = None,
+    all_history: bool = False,
     account_id: int | None = Query(default=None, ge=1),
     user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -763,7 +768,7 @@ def order_status_summary(
     if account_id is not None:
         get_account(db, user.id, account_id)
     filters = [Order.user_id == user.id,
-               Order.created_at >= now() - timedelta(days=days)]
+               *timestamp_filters(Order.created_at, None if all_history else days, start_date, end_date)]
     if account_id is not None:
         filters.append(Order.mercado_livre_user_id == account_id)
     rows = db.execute(select(Order.status, func.count(Order.id))
@@ -822,11 +827,12 @@ def financial(days: int = Query(default=30, ge=1, le=365),
 
 @router.get("/ads-profitability")
 def profitability(days: int = Query(default=30, ge=1, le=365),
+                  start_date: date | None = None,
+                  end_date: date | None = None,
                   user: UserModel = Depends(get_current_user),
                   db: Session = Depends(get_db)):
-    cutoff = date.today() - timedelta(days=days)
     rows = db.scalars(select(Ads).where(
-        Ads.user_id == user.id, Ads.report_date >= cutoff)).all()
+        Ads.user_id == user.id, *date_filters(Ads.report_date, days, start_date, end_date))).all()
     costs = {r.external_id: r for r in db.scalars(
         select(Cost).where(Cost.user_id == user.id)).all()}
     spend = sum(r.ad_spend for r in rows)
@@ -857,7 +863,10 @@ def profitability(days: int = Query(default=30, ge=1, le=365),
 
 
 @router.get("/timeline")
-def timeline(days: int = Query(default=30, ge=1, le=90),
+def timeline(days: int = Query(default=30, ge=1, le=365),
+             start_date: date | None = None,
+             end_date: date | None = None,
+             all_history: bool = False,
              account_id: int | None = None,
              user: UserModel = Depends(get_current_user),
              db: Session = Depends(get_db)):
@@ -865,11 +874,11 @@ def timeline(days: int = Query(default=30, ge=1, le=90),
     seller = account_id
     if seller is not None:
         get_account(db, user.id, seller)
-    threshold = date.today() - timedelta(days=days)
-    order_query = select(Order).where(Order.user_id == user.id,
-                                      Order.created_at >= now() - timedelta(days=days))
-    visit_query = select(Visits).where(Visits.user_id == user.id,
-                                       Visits.report_date >= threshold)
+    history_days = None if all_history else days
+    order_query = select(Order).where(
+        Order.user_id == user.id, *timestamp_filters(Order.created_at, history_days, start_date, end_date))
+    visit_query = select(Visits).where(
+        Visits.user_id == user.id, *date_filters(Visits.report_date, history_days, start_date, end_date))
     if seller is not None:
         order_query = order_query.where(Order.mercado_livre_user_id == seller)
         visit_query = visit_query.where(Visits.mercado_livre_user_id == seller)
@@ -878,7 +887,11 @@ def timeline(days: int = Query(default=30, ge=1, le=90),
     daily = defaultdict(lambda: {"orders": 0, "cancelled_orders": 0,
                                  "gross_non_cancelled": 0.0, "visits": None})
     for order in orders:
-        day = order.created_at.date().isoformat()
+        created_at = order.created_at
+        if start_date is not None:
+            created_at = (created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc))
+            created_at = created_at.astimezone(REPORT_ZONE)
+        day = created_at.date().isoformat()
         daily[day]["orders"] += 1
         if order.is_cancelled:
             daily[day]["cancelled_orders"] += 1

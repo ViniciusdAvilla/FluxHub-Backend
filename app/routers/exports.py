@@ -1,5 +1,5 @@
 """Tenant-scoped XLSX exports. No buyer personal data is included."""
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from io import BytesIO
 from typing import Literal
 
@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
+from app.core.report_period import timestamp_filters
 from app.database.models import (
     UserModel, ProductModel,
     MercadoLivreOrderSnapshotModel as Order,
@@ -58,8 +59,11 @@ def populate_sheet(workbook, name, records):
 def generate_report(
     db: Session, user_id: int, report: str,
     account_id: int | None = None, days: int | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> bytes:
     """Write-only generation avoids materializing all seller records in Python."""
+    period = timestamp_filters(Order.created_at, days, start_date, end_date)
     workbook = Workbook(write_only=True)
 
     if report in ("complete", "products"):
@@ -75,8 +79,7 @@ def generate_report(
         stmt = select(Order).where(Order.user_id == user_id).order_by(Order.created_at.desc())
         if account_id is not None:
             stmt = stmt.where(Order.mercado_livre_user_id == account_id)
-        if days is not None:
-            stmt = stmt.where(Order.created_at >= datetime.now(timezone.utc) - timedelta(days=days))
+        stmt = stmt.where(*period)
         populate_sheet(workbook, "Pedidos", (
             (row.external_id, row.mercado_livre_user_id, row.status, row.total_amount,
              row.created_at, row.is_cancelled)
@@ -85,11 +88,11 @@ def generate_report(
         line_stmt = select(OrderLine).where(OrderLine.user_id == user_id).order_by(OrderLine.id)
         if account_id is not None:
             line_stmt = line_stmt.where(OrderLine.mercado_livre_user_id == account_id)
-        if days is not None:
+        if period:
             scoped = select(Order.external_id).where(
                 Order.user_id == user_id,
                 Order.mercado_livre_user_id == OrderLine.mercado_livre_user_id,
-                Order.created_at >= datetime.now(timezone.utc) - timedelta(days=days))
+                *period)
             line_stmt = line_stmt.where(OrderLine.order_external_id.in_(scoped))
         populate_sheet(workbook, "Itens vendidos", (
             (row.order_external_id, row.mercado_livre_user_id,
@@ -124,10 +127,12 @@ def download_xlsx(
     report: Literal["complete", "products", "orders", "listings", "costs"],
     account_id: int | None = Query(default=None, ge=1),
     days: int | None = Query(default=None, ge=1, le=365),
+    start_date: date | None = None,
+    end_date: date | None = None,
     user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    content = generate_report(db, user.id, report, account_id, days)
+    content = generate_report(db, user.id, report, account_id, days, start_date, end_date)
     name = f"fluxhub-{report}-{datetime.now(timezone.utc):%Y%m%d}.xlsx"
     return StreamingResponse(
         BytesIO(content),
