@@ -4,13 +4,14 @@ The endpoint intentionally selects only stable columns of sync_jobs so that
 an unapplied additive worker migration never prevents the revenue dashboard
 from reading already-saved orders.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import date
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
+from app.core.report_period import timestamp_filters
 from app.database.models import (
     CompanyDataSourceModel,
     MercadoLivreOrderSnapshotModel as Order,
@@ -25,11 +26,12 @@ router = APIRouter(prefix="/sales", tags=["Sales"])
 @router.get("/")
 def sales(
     days: int = Query(default=30, ge=1, le=365),
+    start_date: date | None = None,
+    end_date: date | None = None,
     account_id: int | None = Query(default=None, ge=1),
     user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     not_cancelled = Order.is_cancelled.is_(False)
     paid = not_cancelled & (Order.status == "paid")
     stmt = select(
@@ -42,7 +44,7 @@ def sales(
             .label("gross_paid"),
     ).where(
         Order.user_id == user.id,
-        Order.created_at >= cutoff,
+        *timestamp_filters(Order.created_at, days, start_date, end_date),
     )
     if account_id is not None:
         stmt = stmt.where(Order.mercado_livre_user_id == account_id)

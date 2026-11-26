@@ -4,7 +4,7 @@ PII is NEVER stored in PostgreSQL or returned with ordinary list endpoints.
 Only authenticated tenant owners may request live buyer details for an order
 which already belongs to their authorized Mercado Livre account.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import date
 from math import isfinite
 from typing import Any, Literal
 
@@ -13,6 +13,7 @@ from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
+from app.core.report_period import timestamp_filters
 from app.database.models import (
     UserModel, MercadoLivreOrderSnapshotModel as Order,
     MercadoLivreOrderLineModel as OrderLine,
@@ -28,14 +29,11 @@ from app.services.order_finance import summarize_order_finance
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
-def _base(user_id: int, account_id: int | None, days: int | None):
+def _base(user_id: int, account_id: int | None, days: int | None, start_date=None, end_date=None):
     query = select(Order).where(Order.user_id == user_id)
     if account_id is not None:
         query = query.where(Order.mercado_livre_user_id == account_id)
-    if days is not None:
-        query = query.where(
-            Order.created_at >= datetime.now(timezone.utc) - timedelta(days=days))
-    return query
+    return query.where(*timestamp_filters(Order.created_at, days, start_date, end_date))
 
 
 def _matching(query, search: str | None):
@@ -123,10 +121,12 @@ def list_orders(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     days: int | None = Query(default=None, ge=1, le=365),
+    start_date: date | None = None,
+    end_date: date | None = None,
     user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    rows = db.scalars(_base(user.id, account_id, days).order_by(
+    rows = db.scalars(_base(user.id, account_id, days, start_date, end_date).order_by(
         Order.created_at.desc(), Order.id.desc()).offset(offset).limit(limit)).all()
     return _decorate(db, rows)
 
@@ -137,6 +137,8 @@ def paged_orders(
     limit: int = Query(default=30, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     days: int | None = Query(default=None, ge=1, le=365),
+    start_date: date | None = None,
+    end_date: date | None = None,
     status: str | None = Query(default=None, max_length=40),
     search: str | None = Query(default=None, max_length=100),
     min_amount: float | None = Query(default=None, ge=0),
@@ -148,17 +150,15 @@ def paged_orders(
 ):
     if min_amount is not None and max_amount is not None and min_amount > max_amount:
         raise HTTPException(422, "Faixa de valor inválida.")
-    source = _matching(_base(user.id, account_id, days), search)
+    source = _matching(_base(user.id, account_id, days, start_date, end_date), search)
     summary = select(Order.status, func.count(Order.id)).where(
         Order.user_id == user.id)
     if account_id is not None:
         summary = summary.where(Order.mercado_livre_user_id == account_id)
-    if days is not None:
-        summary = summary.where(
-            Order.created_at >= datetime.now(timezone.utc) - timedelta(days=days))
+    summary = summary.where(*timestamp_filters(Order.created_at, days, start_date, end_date))
     # Status counters follow the current period and search, independent of status tab.
     if search:
-        summary_ids = _matching(_base(user.id, account_id, days), search).with_only_columns(
+        summary_ids = _matching(_base(user.id, account_id, days, start_date, end_date), search).with_only_columns(
             Order.id)
         summary = summary.where(Order.id.in_(summary_ids))
     if min_amount is not None:
@@ -182,7 +182,7 @@ def paged_orders(
     order_expression = order_column.asc() if sort_dir == "asc" else order_column.desc()
     rows = db.scalars(source.order_by(
         order_expression, Order.id.desc()).offset(offset).limit(limit)).all()
-    paid_query = _matching(_base(user.id, account_id, days), search).where(
+    paid_query = _matching(_base(user.id, account_id, days, start_date, end_date), search).where(
         Order.status == "paid")
     if min_amount is not None:
         paid_query = paid_query.where(Order.total_amount >= min_amount)
