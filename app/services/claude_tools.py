@@ -78,6 +78,7 @@ TOOL_DEFINITIONS.extend([
     _definition("consultar_catalogo", "Pesquisa no catálogo completo da conta por ID de anúncio, nome, categoria ou fabricante. Retorna preço, estoque e custos cadastrados por produto com paginação.", {
         "busca": _search, "limite": _limit, "pagina": {"type": "integer", "minimum": 1, "maximum": 10000},
     }),
+    _definition("contar_anuncios", "Conta anúncios armazenados no FluxHub e mostra os totais por status. Use para perguntas sobre quantidade de anúncios.", {}),
     _definition("diagnosticar_dados", "Cobertura dos dados do FluxHub: integrações, última sincronização, anúncios por status, intervalo de pedidos e quantidade de custos cadastrados.", {}),
     _definition("desempenho_periodo", "Compara períodos consultando separadamente cada intervalo. Retorna pedidos e faturamento pago, cancelamentos, visitas e Product Ads. Use inicio/fim ou dias.", _dates),
 ])
@@ -134,6 +135,14 @@ def _catalog(db: Session, user_id: int, args: dict) -> dict:
             "aviso": "Custos cadastrados são estimativas para precificação. Nulo significa que o dado não está disponível."}
 
 
+def _listing_counts(db: Session, user_id: int) -> dict:
+    counts = dict(db.execute(select(Listing.status, func.count(Listing.id)).where(
+        Listing.user_id == user_id).group_by(Listing.status)).all())
+    return {"total_anuncios": sum(counts.values()), "anuncios_por_status": counts,
+            "origem": "PostgreSQL FluxHub — anúncios sincronizados",
+            "aviso": "Contagem dos anúncios armazenados; a cobertura depende da sincronização."}
+
+
 def _coverage(db: Session, user_id: int) -> dict:
     sources = db.execute(select(
         Source.provider.label("provedor"), Source.display_name.label("nome"),
@@ -142,12 +151,11 @@ def _coverage(db: Session, user_id: int) -> dict:
     ).where(Source.company_id == user_id).order_by(Source.id).limit(20)).mappings()
     start, end = db.execute(select(func.min(Order.created_at), func.max(Order.created_at))
                             .where(Order.user_id == user_id)).one()
-    listing_counts = dict(db.execute(select(Listing.status, func.count(Listing.id)).where(
-        Listing.user_id == user_id).group_by(Listing.status)).all())
+    listings = _listing_counts(db, user_id)
     costs = db.scalar(select(func.count(Cost.id)).where(Cost.user_id == user_id)) or 0
     return {"origem": "PostgreSQL FluxHub — fontes, anúncios, pedidos e custos",
             "integracoes": [{**row, "sincronizado_em": row["sincronizado_em"].isoformat() if row["sincronizado_em"] else None}
-                            for row in sources], "anuncios_por_status": listing_counts,
+                            for row in sources], "anuncios_por_status": listings["anuncios_por_status"],
             "primeiro_pedido_registrado": start.isoformat() if start else None,
             "ultimo_pedido_registrado": end.isoformat() if end else None,
             "custos_cadastrados": costs,
@@ -198,6 +206,8 @@ def execute_tool(db: Session, user_id: int, name: str, arguments: dict | None = 
 
     if name == "consultar_catalogo":
         return _catalog(db, user_id, args)
+    if name == "contar_anuncios":
+        return _listing_counts(db, user_id)
     if name == "diagnosticar_dados":
         return _coverage(db, user_id)
     if name == "desempenho_periodo":
