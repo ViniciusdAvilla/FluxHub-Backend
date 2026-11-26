@@ -150,6 +150,47 @@ def test_claude_period_keeps_missing_metrics_distinct_from_zero(db):
         execute_tool(db, 1, "desempenho_periodo", {"inicio": "2024-03-01"})
 
 
+def test_claude_reports_requested_metric_and_status_only(db):
+    for user_id, status in [(1, "active"), (1, "paused"), (2, "active")]:
+        db.add(Listing(user_id=user_id, mercado_livre_user_id=10, external_id=status,
+                       status=status, title="Anúncio", price=10))
+    db.commit()
+    result = execute_tool(db, 1, "contar_anuncios", {"status": "active"})
+    assert result["total_no_status"] == 1
+    assert result["anuncios_por_status"] == {"active": 1}
+    assert "total_anuncios" not in result
+
+    result = execute_tool(db, 1, "desempenho_periodo", {"periodo": "ontem", "metrica": "visitas"})
+    assert result["inicio"] == result["fim"]
+    assert result["visitas"] is None
+    assert "pedidos_registrados" not in result
+    assert "gasto_ads_brl" not in result
+    with pytest.raises(ValueError):
+        execute_tool(db, 1, "desempenho_periodo", {"periodo": "ontem", "dias": 7})
+
+
+def test_claude_product_sales_do_not_fall_back_to_the_general_ranking(db):
+    from datetime import datetime, timezone
+
+    for user_id in (1, 2):
+        db.add(Order(user_id=user_id, mercado_livre_user_id=10, external_id="P1",
+                     status="paid", total_amount=500, is_cancelled=False,
+                     created_at=datetime(2024, 3, 1, 15, tzinfo=timezone.utc)))
+        for idx, (title, quantity, price) in enumerate([("Filtro de Óleo", 3, 10), ("Pneu", 1, 200)]):
+            db.add(Line(user_id=user_id, mercado_livre_user_id=10, order_external_id="P1",
+                        line_number=idx, item_id=f"ML{idx}", title=title, quantity=quantity, unit_price=price))
+    db.commit()
+
+    dates = {"inicio": "2024-03-01", "fim": "2024-03-01"}
+    result = execute_tool(db, 1, "produtos_mais_vendidos", {**dates, "busca": "filtro", "ordenar_por": "faturamento"})
+    assert [item["id"] for item in result["produtos"]] == ["ML0"]
+    assert result["produtos"][0]["unidades"] == 3
+    assert result["produtos"][0]["vendas_brutas_brl"] == 30
+    assert execute_tool(db, 1, "produtos_mais_vendidos", {**dates, "busca": "pastilha"})["produtos"] == []
+    by_revenue = execute_tool(db, 1, "produtos_mais_vendidos", {**dates, "ordenar_por": "faturamento"})
+    assert by_revenue["produtos"][0]["id"] == "ML1"
+
+
 def test_mcp_jsonrpc_protocol_requires_mcp_token(db):
     import asyncio
     import json
