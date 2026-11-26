@@ -12,7 +12,8 @@ from app.config.settings import settings
 from app.database.models import (
     UserModel, ProductModel, MercadoLivreOrderSnapshotModel as Order,
     MercadoLivreOrderLineModel as Line, MercadoLivreListingSnapshotModel as Listing,
-    MercadoLivreAdsDailySnapshotModel as Ads,
+    MercadoLivreAdsDailySnapshotModel as Ads, MercadoLivreProductCostModel as Cost,
+    MercadoLivreVisitDailySnapshotModel as Visit, CompanyDataSourceModel as Source,
 )
 from app.database.mcp_models import McpClient, McpAuthorizationRequest, McpGrant
 from app.routers import mcp_oauth
@@ -25,7 +26,7 @@ def db(monkeypatch):
     monkeypatch.setattr(settings, "frontend_url", "https://myfluxhub.tech")
     engine = create_engine("sqlite+pysqlite:///:memory:")
     for table in (UserModel.__table__, ProductModel.__table__, Order.__table__,
-                  Line.__table__, Listing.__table__, Ads.__table__,
+                  Line.__table__, Listing.__table__, Ads.__table__, Cost.__table__, Visit.__table__, Source.__table__,
                   McpClient.__table__, McpAuthorizationRequest.__table__, McpGrant.__table__):
         table.create(bind=engine, checkfirst=True)
     with Session(engine) as session:
@@ -118,6 +119,35 @@ def test_tools_are_scoped_and_read_only(db):
         execute_tool(db, 1, "consultar_estoque", {"limite": 10000})
     with pytest.raises(ValueError):
         execute_tool(db, 1, "excluir_pedidos", {})
+
+
+def test_claude_catalog_uses_only_the_requesting_tenant_costs(db):
+    for user_id, cost in [(1, 14.5), (2, 900)]:
+        db.add(ProductModel(company_id=user_id, external_id="MLB123", title="Filtro de óleo",
+                            category="Auto", brand="Marca", item_condition="new"))
+        db.add(Cost(user_id=user_id, external_id="MLB123", unit_cost=cost, manufacturer="Oficina"))
+    db.commit()
+    result = execute_tool(db, 1, "consultar_catalogo", {"busca": "oficina"})
+    assert result["total_encontrado"] == 1
+    assert result["produtos"][0]["custo_unitario_brl"] == 14.5
+    assert execute_tool(db, 1, "diagnosticar_dados")["custos_cadastrados"] == 1
+
+
+def test_claude_period_keeps_missing_metrics_distinct_from_zero(db):
+    from datetime import datetime, timezone
+
+    values = dict(external_id="P-1", status="paid", is_cancelled=False,
+                  created_at=datetime(2024, 3, 2, 2, 59, tzinfo=timezone.utc))
+    db.add_all([Order(user_id=1, total_amount=40, **values),
+                Order(user_id=2, total_amount=900, **values)])
+    db.commit()
+    result = execute_tool(db, 1, "desempenho_periodo", {"inicio": "2024-03-01", "fim": "2024-03-01"})
+    assert result["pedidos_pagos"] == 1
+    assert result["faturamento_pago_bruto_brl"] == 40
+    assert result["visitas"] is None
+    assert result["gasto_ads_brl"] is None
+    with pytest.raises(ValueError):
+        execute_tool(db, 1, "desempenho_periodo", {"inicio": "2024-03-01"})
 
 
 def test_mcp_jsonrpc_protocol_requires_mcp_token(db):

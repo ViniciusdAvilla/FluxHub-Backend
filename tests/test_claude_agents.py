@@ -69,3 +69,50 @@ def test_changing_model_does_not_erase_saved_key(claude_db):
     _save(claude_db, 1, key)
     _save(claude_db, 1, None, model="claude-sonnet-4-6")
     assert claude_agents._provider(claude_db, 1) == (key, "claude-sonnet-4-6")
+
+
+def test_agent_queries_fluxhub_before_returning_analysis(claude_db, monkeypatch):
+    import httpx
+
+    _save(claude_db, 1, "sk-ant-" + "a" * 40)
+    monkeypatch.setattr(claude_agents, "_recent", {})
+    monkeypatch.setattr(claude_agents, "build_tenant_context", lambda db, user_id: {})
+    calls = []
+
+    def execute(db, user_id, name, arguments):
+        assert user_id == 1
+        assert name == "desempenho_periodo"
+        assert arguments == {"dias": 7}
+        return {"origem": "FluxHub — pedidos", "pedidos_pagos": 12}
+
+    class MockClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, *, headers, json):
+            calls.append(json)
+            if len(calls) == 1:
+                assert json["tool_choice"] == {"type": "any"}
+                return httpx.Response(200, json={"content": [{
+                    "type": "tool_use", "id": "tool_1", "name": "desempenho_periodo",
+                    "input": {"dias": 7},
+                }]})
+            assert json["tool_choice"] == {"type": "auto"}
+            assert '"pedidos_pagos": 12' in json["messages"][-1]["content"][0]["content"]
+            return httpx.Response(200, json={"content": [{
+                "type": "text", "text": "12 pedidos pagos nos últimos 7 dias.",
+            }]})
+
+    monkeypatch.setattr(claude_agents, "execute_tool", execute)
+    monkeypatch.setattr(claude_agents.httpx, "AsyncClient", MockClient)
+    result = asyncio.run(claude_agents.run_agent(claude_agents.AgentInput(
+        agent="sales", instruction="Quantos pedidos pagos nos últimos 7 dias?",
+    ), user=_user(1), db=claude_db))
+    assert result["sources"] == ["FluxHub — pedidos"]
+    assert result["analysis"] == "12 pedidos pagos nos últimos 7 dias."
