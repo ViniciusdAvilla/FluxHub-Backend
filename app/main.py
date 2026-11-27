@@ -37,6 +37,7 @@ from app.routers.claude_agents import router as claude_agents_router
 from app.routers.mcp_oauth import router as mcp_oauth_router
 from app.routers.fluxhub_mcp import router as fluxhub_mcp_router
 from app.routers.listing_health import router as listing_health_router
+from app.routers.market import router as market_router
 
 
 logger = logging.getLogger(__name__)
@@ -144,6 +145,7 @@ app.include_router(claude_agents_router, prefix=settings.api_prefix)
 app.include_router(mcp_oauth_router, prefix=settings.api_prefix)
 app.include_router(fluxhub_mcp_router, prefix=settings.api_prefix)
 app.include_router(listing_health_router, prefix=settings.api_prefix)
+app.include_router(market_router, prefix=settings.api_prefix)
 
 # Protege todos os caminhos, inclusive /docs e /openapi.json.
 protect_fastapi(app)
